@@ -5,8 +5,14 @@
 
 namespace eosio { namespace chain {
 
+   enum transaction_extension_id {
+      deferred_transaction_generation_context_id = 0,
+      resource_payer_id,
+      TRANSACTION_EXTENSION_ID_COUNT
+   };
+
    struct deferred_transaction_generation_context : fc::reflect_init {
-      static constexpr uint16_t extension_id() { return 0; }
+      static constexpr uint16_t extension_id() { return transaction_extension_id::deferred_transaction_generation_context_id; }
       static constexpr bool     enforce_unique() { return true; }
 
       deferred_transaction_generation_context() = default;
@@ -24,6 +30,30 @@ namespace eosio { namespace chain {
       account_name        sender;
    };
 
+   struct resource_payer : fc::reflect_init {
+      static constexpr uint16_t extension_id() { return transaction_extension_id::resource_payer_id; }
+      static constexpr bool enforce_unique() { return true; }
+
+      resource_payer() = default;
+
+      resource_payer( account_name payer, uint64_t max_net_bytes, uint64_t max_cpu_us, uint64_t max_memory_bytes )
+         : payer(payer)
+         ,max_net_bytes( max_net_bytes )
+         ,max_cpu_us( max_cpu_us )
+         ,max_memory_bytes( max_memory_bytes )
+      {}
+
+      void reflector_init();
+
+      account_name payer;
+
+      uint64_t max_net_bytes = 0;
+      uint64_t max_cpu_us = 0;
+      uint64_t max_memory_bytes = 0;
+   };
+
+   using resource_payer_t = struct resource_payer;
+
    namespace detail {
       template<typename... Ts>
       struct transaction_extension_types {
@@ -33,7 +63,8 @@ namespace eosio { namespace chain {
    }
 
    using transaction_extension_types = detail::transaction_extension_types<
-      deferred_transaction_generation_context
+      deferred_transaction_generation_context,
+      resource_payer
    >;
 
    using transaction_extension = transaction_extension_types::transaction_extension_t;
@@ -97,6 +128,9 @@ namespace eosio { namespace chain {
          }
          return account_name();
       }
+
+      account_name resource_payer(bool)const;
+      std::optional<resource_payer_t> resource_payer_info( bool is_resource_payer_pf_activated ) const;
 
       flat_multimap<uint16_t, transaction_extension> validate_and_extract_extensions()const;
    };
@@ -211,7 +245,13 @@ namespace eosio { namespace chain {
 
          struct none {
             digest_type                     digest;
+
             digest_type                     prunable_digest() const;
+
+            friend bool operator==(const none& lhs, const none& rhs) {
+               return lhs.digest == rhs.digest;
+            }
+            friend bool operator!=(const none& lhs, const none& rhs) { return !(lhs == rhs); }
          };
 
          using segment_type = std::variant<digest_type, bytes>;
@@ -219,26 +259,52 @@ namespace eosio { namespace chain {
          struct partial {
             std::vector<signature_type>     signatures;
             std::vector<segment_type>       context_free_segments;
+
             digest_type                     prunable_digest() const;
+
+            friend bool operator==(const partial& lhs, const partial& rhs) {
+               return std::tie( lhs.signatures, lhs.context_free_segments ) ==
+                      std::tie( rhs.signatures, rhs.context_free_segments );
+            }
+            friend bool operator!=(const partial& lhs, const partial& rhs) { return !(lhs == rhs); }
          };
 
          struct full {
             std::vector<signature_type>     signatures;
             std::vector<bytes>              context_free_segments;
+
             digest_type                     prunable_digest() const;
+
+            friend bool operator==(const full& lhs, const full& rhs) {
+               return std::tie( lhs.signatures, lhs.context_free_segments ) ==
+                      std::tie( rhs.signatures, rhs.context_free_segments );
+            }
+            friend bool operator!=(const full& lhs, const full& rhs) { return !(lhs == rhs); }
          };
 
          struct full_legacy {
             std::vector<signature_type>     signatures;
             bytes                           packed_context_free_data;
             vector<bytes>                   context_free_segments;
+
             digest_type                     prunable_digest() const;
+
+            friend bool operator==(const full_legacy& lhs, const full_legacy& rhs) {
+               return std::tie( lhs.signatures, lhs.packed_context_free_data, lhs.context_free_segments ) ==
+                      std::tie( rhs.signatures, rhs.packed_context_free_data, rhs.context_free_segments );
+            }
+            friend bool operator!=(const full_legacy& lhs, const full_legacy& rhs) { return !(lhs == rhs); }
          };
 
          using prunable_data_t = std::variant< full_legacy,
                                                none,
                                                partial,
                                                full >;
+
+         friend bool operator==(const prunable_data_type& lhs, const prunable_data_type& rhs) {
+            return lhs.prunable_data == rhs.prunable_data;
+         }
+         friend bool operator!=(const prunable_data_type& lhs, const prunable_data_type& rhs) { return !(lhs == rhs); }
 
          prunable_data_type prune_all() const;
          digest_type digest() const;
@@ -264,6 +330,12 @@ namespace eosio { namespace chain {
       explicit packed_transaction(signed_transaction t, bool legacy, compression_type _compression = compression_type::none);
 
       packed_transaction_v0_ptr to_packed_transaction_v0() const;
+
+      friend bool operator==(const packed_transaction& lhs, const packed_transaction& rhs) {
+         return std::tie(lhs.compression, lhs.prunable_data, lhs.packed_trx) ==
+                std::tie(rhs.compression, rhs.prunable_data, rhs.packed_trx);
+      }
+      friend bool operator!=(const packed_transaction& lhs, const packed_transaction& rhs) { return !(lhs == rhs); }
 
       uint32_t get_unprunable_size()const;
       uint32_t get_prunable_size()const;
@@ -314,6 +386,7 @@ namespace eosio { namespace chain {
 } } /// namespace eosio::chain
 
 FC_REFLECT(eosio::chain::deferred_transaction_generation_context, (sender_trx_id)(sender_id)(sender) )
+FC_REFLECT(eosio::chain::resource_payer, (payer)(max_net_bytes)(max_cpu_us)(max_memory_bytes) )
 FC_REFLECT( eosio::chain::transaction_header, (expiration)(ref_block_num)(ref_block_prefix)
                                               (max_net_usage_words)(max_cpu_usage_ms)(delay_sec) )
 FC_REFLECT_DERIVED( eosio::chain::transaction, (eosio::chain::transaction_header), (context_free_actions)(actions)(transaction_extensions) )

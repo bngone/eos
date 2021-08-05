@@ -267,6 +267,11 @@ REGISTER_HOST_FUNCTION(set_kv_parameters_packed, privileged_check);
 REGISTER_HOST_FUNCTION(is_privileged, privileged_check);
 REGISTER_HOST_FUNCTION(set_privileged, privileged_check);
 
+// security group api
+REGISTER_HOST_FUNCTION(add_security_group_participants, privileged_check);
+REGISTER_HOST_FUNCTION(remove_security_group_participants, privileged_check);
+REGISTER_HOST_FUNCTION(in_active_security_group);
+REGISTER_HOST_FUNCTION(get_active_security_group);
 // producer api
 REGISTER_LEGACY_HOST_FUNCTION(get_active_producers);
 

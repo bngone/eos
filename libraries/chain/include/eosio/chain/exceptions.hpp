@@ -331,7 +331,7 @@ namespace eosio { namespace chain {
       FC_DECLARE_DERIVED_EXCEPTION( database_revision_mismatch_exception, database_exception,
                                     3060006, "Chainbase and chain-kv databases are at different revisions" )
       FC_DECLARE_DERIVED_EXCEPTION( database_move_kv_disk_exception, database_exception,
-                                    3060007, "Chainbase already contains eosio.kvdisk entries; use resync, replay, or snapshot to move these to rocksdb" )
+                                    3060007, "Cannot change backing store when existing state has already stored data in a different backing store; use resync, replay, or snapshot to move these to the new backing store" )
       FC_DECLARE_DERIVED_EXCEPTION( kv_rocksdb_bad_value_size_exception, database_exception,
                                     3060008, "The size of value returned from RocksDB is less than payer's size" )
       FC_DECLARE_DERIVED_EXCEPTION( bad_composite_key_exception, database_exception,
@@ -382,6 +382,12 @@ namespace eosio { namespace chain {
                                     3080008, "Transaction exceeded the current greylisted account CPU usage limit" )
       FC_DECLARE_DERIVED_EXCEPTION( disk_usage_exceeded, resource_exhausted_exception,
                                     3080009, "Account using more than allotted DISK usage" )
+      FC_DECLARE_DERIVED_EXCEPTION( resource_payer_net_exceeded, resource_exhausted_exception,
+                                    3080010, "Transaction exceeded the resource payer network usage limit" )
+      FC_DECLARE_DERIVED_EXCEPTION( resource_payer_cpu_exceeded, resource_exhausted_exception,
+                                    3080011, "Transaction exceeded the resource payer CPU usage limit" )
+      FC_DECLARE_DERIVED_EXCEPTION( resource_payer_memory_exceeded, resource_exhausted_exception,
+                                    3080012, "FOR FUTURE USE - Transaction exceeded the resource payer RAM usage limit" )
 
       FC_DECLARE_DERIVED_EXCEPTION( leeway_deadline_exception, deadline_exception,
                                     3081001, "Transaction reached the deadline set due to leeway on account CPU limits" )
@@ -498,7 +504,8 @@ namespace eosio { namespace chain {
                                  3140000, "Exceptions that are allowed to bubble out of emit calls in controller" )
       FC_DECLARE_DERIVED_EXCEPTION( checkpoint_exception,          controller_emit_signal_exception,
                                    3140001, "Block does not match checkpoint" )
-
+      FC_DECLARE_DERIVED_EXCEPTION( state_history_write_exception, controller_emit_signal_exception,
+                                   3140002, "State history write error" )
 
    FC_DECLARE_DERIVED_EXCEPTION( abi_exception,                           chain_exception,
                                  3015000, "ABI exception" )
@@ -598,6 +605,8 @@ namespace eosio { namespace chain {
                                     3170011, "The signer returned no valid block signatures" )
       FC_DECLARE_DERIVED_EXCEPTION( unsupported_multiple_block_signatures,  producer_exception,
                                     3170012, "The signer returned multiple signatures but that is not supported" )
+      FC_DECLARE_DERIVED_EXCEPTION( block_validation_error,  producer_exception,
+                                    3170013, "Block Validation Exception" )
 
    FC_DECLARE_DERIVED_EXCEPTION( reversible_blocks_exception,           chain_exception,
                                  3180000, "Reversible Blocks exception" )
@@ -652,6 +661,8 @@ namespace eosio { namespace chain {
                                  3240000, "Snapshot exception" )
       FC_DECLARE_DERIVED_EXCEPTION( snapshot_validation_exception,   snapshot_exception,
                                     3240001, "Snapshot Validation Exception" )
+      FC_DECLARE_DERIVED_EXCEPTION( snapshot_decompress_exception,   snapshot_exception,
+                                    3240002, "Snapshot decompress error" )
 
    FC_DECLARE_DERIVED_EXCEPTION( protocol_feature_exception,    chain_exception,
                                  3250000, "Protocol feature exception" )
@@ -677,4 +688,11 @@ namespace eosio { namespace chain {
    FC_DECLARE_DERIVED_EXCEPTION( state_history_exception,    chain_exception,
                                  3280000, "State history exception" )
 
+   FC_DECLARE_DERIVED_EXCEPTION( ssl_exception, chain_exception,
+                                 3290000, "SSL exception")
+
+      FC_DECLARE_DERIVED_EXCEPTION( ssl_incomplete_configuration, ssl_exception,
+                                    3290001, "Incomplete SSL configuration")
+      FC_DECLARE_DERIVED_EXCEPTION( ssl_configuration_error, ssl_exception,
+                                    3290002, "SSL configuration error")
 } } // eosio::chain

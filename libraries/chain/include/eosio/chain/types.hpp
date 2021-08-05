@@ -74,9 +74,6 @@ namespace eosio { namespace chain {
    using                               fc::flat_multimap;
    using                               fc::flat_set;
    using                               std::variant;
-   using                               fc::ecc::range_proof_type;
-   using                               fc::ecc::range_proof_info;
-   using                               fc::ecc::commitment_type;
 
    using public_key_type  = fc::crypto::public_key;
    using private_key_type = fc::crypto::private_key;
@@ -332,7 +329,6 @@ namespace eosio { namespace chain {
              std::tie(rhs._hash[0], rhs._hash[1], rhs._hash[2], rhs._hash[3]);
       }
    };
-
 
    /**
     *  Extentions are prefixed with type and are a buffer that can be

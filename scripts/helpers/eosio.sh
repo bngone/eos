@@ -130,7 +130,7 @@ function print_supported_linux_distros_and_exit() {
 
 function ensure-compiler() {
     # Support build-essentials on ubuntu
-    if [[ $NAME == "CentOS Linux" ]] || [[ $VERSION_ID == "16.04" ]] || ( $PIN_COMPILER && ( [[ $VERSION_ID == "18.04" ]] || [[ $VERSION_ID == "20.04" ]] ) ); then
+    if [[ $NAME == "CentOS Linux" ]] || ( $PIN_COMPILER && ( [[ $VERSION_ID == "18.04" ]] || [[ $VERSION_ID == "20.04" ]] ) ); then
         export CXX=${CXX:-'g++'}
         export CC=${CC:-'gcc'}
     fi
@@ -233,7 +233,7 @@ function ensure-boost() {
             local SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
         fi
         execute bash -c "cd $SRC_DIR && \
-        curl -LO https://dl.bintray.com/boostorg/release/$BOOST_VERSION_MAJOR.$BOOST_VERSION_MINOR.$BOOST_VERSION_PATCH/source/boost_$BOOST_VERSION.tar.bz2 \
+        curl -LO https://boostorg.jfrog.io/artifactory/main/release/$BOOST_VERSION_MAJOR.$BOOST_VERSION_MINOR.$BOOST_VERSION_PATCH/source/boost_$BOOST_VERSION.tar.bz2 \
         && tar -xjf boost_$BOOST_VERSION.tar.bz2 \
         && cd $BOOST_ROOT \
         && SDKROOT="$SDKROOT" ./bootstrap.sh ${BOOTSTRAP_FLAGS} --prefix=$BOOST_ROOT \
@@ -264,7 +264,7 @@ function ensure-llvm() {
         execute bash -c "cd '$LLVM_TEMP_DIR' \
         && git clone --depth 1 --single-branch --branch $LLVM_VERSION https://github.com/llvm/llvm-project llvm && cd llvm/llvm \
         && mkdir build && cd build \
-        && ${CMAKE} -DCMAKE_INSTALL_PREFIX='${LLVM_ROOT}' -DLLVM_TARGETS_TO_BUILD=host -DLLVM_BUILD_TOOLS=false -DLLVM_ENABLE_RTTI=1 -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_TERMINFO=OFF $LLVM_PINNED_CMAKE_ARGS .. \
+        && ${CMAKE} -DCMAKE_INSTALL_PREFIX='${LLVM_ROOT}' -DLLVM_TARGETS_TO_BUILD=host -DLLVM_BUILD_TOOLS=false -DLLVM_ENABLE_RTTI=1 -DCMAKE_BUILD_TYPE=Release -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_Z3_SOLVER=OFF $LLVM_PINNED_CMAKE_ARGS .. \
         && make -j${JOBS} install"
         echo " - LLVM successfully installed @ ${LLVM_ROOT}"
     elif [[ $NAME == "Ubuntu" ]]; then
@@ -281,12 +281,15 @@ function build-clang() {
     if $BUILD_CLANG; then
         echo "${COLOR_CYAN}[Ensuring Clang support]${COLOR_NC}"
         if [[ ! -d $CLANG_ROOT ]]; then
+            if [[ $ARCH == "Darwin" ]]; then 
+                export CMAKE_XTRA_FLAGS="-DCOMPILER_RT_INCLUDE_TESTS=0 -DCOMPILER_RT_BUILD_SANITIZERS=0 -DCOMPILER_RT_BUILD_XRAY=0"
+            fi
             execute bash -c "cd ${TEMP_DIR} \
             && rm -rf clang10 \
             && git clone --single-branch --branch $PINNED_COMPILER_BRANCH https://github.com/llvm/llvm-project clang10 \
             && cd clang10 \
             && mkdir build && cd build \
-            && ${CMAKE} -G 'Unix Makefiles' -DCMAKE_INSTALL_PREFIX='${CLANG_ROOT}' -DLLVM_ENABLE_PROJECTS='lld;polly;clang;clang-tools-extra;libcxx;libcxxabi;libunwind;compiler-rt' -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_ENABLE_RTTI=ON -DLLVM_INCLUDE_DOCS=OFF -DLLVM_TARGETS_TO_BUILD=host -DCMAKE_BUILD_TYPE=Release ../llvm \
+            && ${CMAKE} -G 'Unix Makefiles' -DCMAKE_INSTALL_PREFIX='${CLANG_ROOT}' -DLLVM_ENABLE_PROJECTS='lld;polly;clang;clang-tools-extra;libcxx;libcxxabi;libunwind;compiler-rt' -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_ENABLE_RTTI=ON -DLLVM_INCLUDE_DOCS=OFF -DLLVM_TARGETS_TO_BUILD=host -DCMAKE_BUILD_TYPE=Release ${CMAKE_XTRA_FLAGS} ../llvm \
             && make -j${JOBS} \
             && make install"
             echo " - Clang 10 successfully installed @ ${CLANG_ROOT}"

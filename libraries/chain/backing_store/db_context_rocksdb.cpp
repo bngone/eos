@@ -8,7 +8,6 @@
 #include <eosio/chain/backing_store/chain_kv_payer.hpp>
 #include <b1/chain_kv/chain_kv.hpp>
 #include <eosio/chain/combined_database.hpp>
-#include <b1/session/rocks_session.hpp>
 
 namespace eosio { namespace chain { namespace backing_store {
 
@@ -16,9 +15,10 @@ namespace eosio { namespace chain { namespace backing_store {
    public:
       using prim_key_iter_type = secondary_key<uint64_t>;
       using session_type = eosio::session::session<eosio::session::session<eosio::session::rocksdb_t>>;
+      using session_variant_type = eosio::session::session_variant<session_type::parent_type, session_type>;
       using shared_bytes = eosio::session::shared_bytes;
 
-      db_context_rocksdb(apply_context& context, name receiver, session_type& session);
+      db_context_rocksdb(apply_context& context, name receiver, session_variant_type session);
 
       ~db_context_rocksdb() override;
 
@@ -134,14 +134,14 @@ namespace eosio { namespace chain { namespace backing_store {
 
       // gets a prefix that allows for only primary key iterators
       static prefix_bundle get_primary_slice_in_primaries(name code, name scope, name table, uint64_t id);
-      pv_bundle get_primary_key_value(name code, name scope, name table, uint64_t id) const;
+      pv_bundle get_primary_key_value(name code, name scope, name table, uint64_t id);
       void set_value(const shared_bytes& primary_key, const payer_payload& pp);
-      int32_t find_and_store_primary_key(const session_type::iterator& session_iter, int32_t table_ei,
+      int32_t find_and_store_primary_key(const session_variant_type::iterator& session_iter, int32_t table_ei,
                                          const shared_bytes& type_prefix, int32_t not_found_return,
                                          const char* calling_func, uint64_t& found_key);
       struct exact_iterator {
          bool                   valid = false;
-         session_type::iterator itr;
+         session_variant_type::iterator itr;
          shared_bytes           type_prefix;
       };
       exact_iterator get_exact_iterator(name code, name scope, name table, uint64_t primary);
@@ -151,7 +151,7 @@ namespace eosio { namespace chain { namespace backing_store {
 
       using uint128_t = eosio::chain::uint128_t;
       using key256_t = eosio::chain::key256_t;
-      session_type&                        current_session;
+      session_variant_type                 current_session;
       db_key_value_iter_store<uint64_t>    primary_iter_store;
       db_key_value_any_lookup              primary_lookup;
       db_key_value_sec_lookup<uint64_t>    sec_lookup_i64;
@@ -162,7 +162,7 @@ namespace eosio { namespace chain { namespace backing_store {
       static constexpr uint64_t            noop_secondary = 0x0;
    }; // db_context_rocksdb
 
-   db_context_rocksdb::db_context_rocksdb(apply_context& context, name receiver, session_type& session)
+   db_context_rocksdb::db_context_rocksdb(apply_context& context, name receiver, session_variant_type session)
    : db_context( context, receiver ), current_session{ session }, primary_lookup(*this, session),
      sec_lookup_i64(*this, session), sec_lookup_i128(*this, session), sec_lookup_i256(*this, session),
      sec_lookup_double(*this, session), sec_lookup_long_double(*this, session) {}
@@ -178,7 +178,7 @@ namespace eosio { namespace chain { namespace backing_store {
 
       EOS_ASSERT( !old_key_value.value, db_rocksdb_invalid_operation_exception, "db_store_i64 called with pre-existing key");
 
-      primary_lookup.add_table_if_needed(old_key_value.full_key, payer);
+      primary_lookup.add_table_if_needed(scope_name, table_name, payer);
 
       const payer_payload pp{payer, value, value_size};
       set_value(old_key_value.full_key, pp);
@@ -200,16 +200,16 @@ namespace eosio { namespace chain { namespace backing_store {
 
       const unique_table t { receiver, scope_name, table_name };
       const auto table_ei = primary_iter_store.cache_table(t);
-      return primary_iter_store.add(primary_key_iter(table_ei, id, payer));
+      const auto store_itr = primary_iter_store.add(primary_key_iter(table_ei, id, payer));
+      primary_iter_store.set_value(store_itr, pp.value, pp.value_size);
+      return store_itr;
    }
 
    void db_context_rocksdb::db_update_i64(int32_t itr, account_name payer, const char* value , size_t value_size) {
       const auto& key_store = primary_iter_store.get(itr);
       const auto& table_store = primary_iter_store.get_table(key_store);
       EOS_ASSERT( table_store.contract == receiver, table_access_violation, "db access violation" );
-      const auto old_key_value = get_primary_key_value(receiver, table_store.scope, table_store.table, key_store.primary);
-
-      EOS_ASSERT( old_key_value.value, db_rocksdb_invalid_operation_exception,
+      EOS_ASSERT( key_store.value, db_rocksdb_invalid_operation_exception,
                   "invariant failure in db_update_i64, iter store found to update but nothing in database");
 
       // copy locally, since below the key_store memory will be changed
@@ -218,10 +218,11 @@ namespace eosio { namespace chain { namespace backing_store {
          payer = old_payer;
       }
 
-      const payer_payload pp{payer, value, value_size};
-      set_value(old_key_value.full_key, pp);
+      const auto old_value_actual_size = key_store.value->size();
 
-      const auto old_value_actual_size = pp.value_size;
+      const payer_payload pp{payer, value, value_size};
+      prefix_bundle old_key = get_primary_slice_in_primaries(table_store.contract, table_store.scope,table_store.table, key_store.primary);
+      set_value(old_key.full_key, pp);
 
       std::string event_id;
       auto dm_logger = context.control.get_deep_mind_logger();
@@ -229,8 +230,10 @@ namespace eosio { namespace chain { namespace backing_store {
          event_id = db_context::table_event(table_store.contract, table_store.scope, table_store.table, name(key_store.primary));
       }
 
-      const int64_t old_size = static_cast<int64_t>(old_value_actual_size + db_key_value_any_lookup::overhead);
-      const int64_t new_size = static_cast<int64_t>(value_size + db_key_value_any_lookup::overhead);
+      const int64_t overhead = db_key_value_any_lookup::overhead;
+      const int64_t old_size = static_cast<int64_t>(old_value_actual_size + overhead);
+      const int64_t new_size = static_cast<int64_t>(value_size + overhead);
+
       if( old_payer != payer ) {
          // refund the existing payer
          update_db_usage( old_payer, -(old_size), db_context::row_update_rem_trace(context.get_action_id(), std::string(event_id)) );
@@ -247,17 +250,17 @@ namespace eosio { namespace chain { namespace backing_store {
       if (dm_logger != nullptr) {
          db_context::log_row_update(*dm_logger, context.get_action_id(), table_store.contract, table_store.scope,
          table_store.table, old_payer, payer, name(key_store.primary),
-         old_key_value.value->data(), old_key_value.value->size(), value, value_size);
+         key_store.value->data(), old_value_actual_size, value, value_size);
       }
+
+      primary_iter_store.set_value(itr, value, value_size);
    }
 
    void db_context_rocksdb::db_remove_i64(int32_t itr) {
       const auto& key_store = primary_iter_store.get(itr);
       const auto& table_store = primary_iter_store.get_table(key_store);
       EOS_ASSERT( table_store.contract == receiver, table_access_violation, "db access violation" );
-      const auto old_key_value = get_primary_key_value(receiver, table_store.scope, table_store.table, key_store.primary);
-
-      EOS_ASSERT( old_key_value.value, db_rocksdb_invalid_operation_exception,
+      EOS_ASSERT( key_store.value, db_rocksdb_invalid_operation_exception,
       "invariant failure in db_remove_i64, iter store found to update but nothing in database");
 
       const auto old_payer = key_store.payer;
@@ -268,36 +271,31 @@ namespace eosio { namespace chain { namespace backing_store {
          event_id = db_context::table_event(table_store.contract, table_store.scope, table_store.table, name(key_store.primary));
       }
 
-      payer_payload pp(*old_key_value.value);
-      update_db_usage( old_payer,  -((int64_t)pp.value_size + db_key_value_any_lookup::overhead), db_context::row_rem_trace(context.get_action_id(), std::move(event_id)) );
+      update_db_usage( old_payer,  -(key_store.value->size() + db_key_value_any_lookup::overhead), db_context::row_rem_trace(context.get_action_id(), std::move(event_id)) );
 
       if (dm_logger != nullptr) {
          db_context::log_row_remove(*dm_logger, context.get_action_id(), table_store.contract, table_store.scope,
-                                      table_store.table, old_payer, name(key_store.primary), pp.value,
-                                      pp.value_size);
+                                      table_store.table, old_payer, name(key_store.primary), key_store.value->data(),
+                                      key_store.value->size());
       }
 
-      current_session.erase(old_key_value.full_key);
-      primary_lookup.remove_table_if_empty(old_key_value.full_key);
+      prefix_bundle old_key = get_primary_slice_in_primaries(table_store.contract, table_store.scope,table_store.table, key_store.primary);
+      current_session.erase(old_key.full_key);
+      primary_lookup.remove_table_if_empty(old_key.full_key);
 
       primary_iter_store.remove(itr); // don't use key_store anymore
    }
 
    int32_t db_context_rocksdb::db_get_i64(int32_t itr, char* value , size_t value_size) {
       const auto& key_store = primary_iter_store.get(itr);
-      const auto& table_store = primary_iter_store.get_table(key_store);
-      const auto old_key_value = get_primary_key_value(table_store.contract, table_store.scope, table_store.table, key_store.primary);
-
-      EOS_ASSERT( old_key_value.value, db_rocksdb_invalid_operation_exception,
+      EOS_ASSERT( key_store.value, db_rocksdb_invalid_operation_exception,
                   "invariant failure in db_get_i64, iter store found to update but nothing in database");
-      payer_payload pp {*old_key_value.value};
-      const char* const actual_value = pp.value;
-      const size_t actual_size = pp.value_size;
+      const size_t actual_size = key_store.value->size();
       if (value_size == 0) {
          return actual_size;
       }
       const size_t copy_size = std::min<size_t>(value_size, actual_size);
-      memcpy( value, actual_value, copy_size );
+      memcpy( value, key_store.value->data(), copy_size );
       return copy_size;
    }
 
@@ -338,7 +336,7 @@ namespace eosio { namespace chain { namespace backing_store {
          if (past_end(session_iter)) {
             --session_iter;
             // either way, the iterator after our known table should have a primary key in this table as the previous iterator
-            if (!past_end(session_iter) || session_iter == current_session.begin()) {
+            if (past_end(session_iter)) {
                // NOTE: matching chainbase functionality, if iterator store found, but no key in db for table
                return primary_iter_store.invalid_iterator();
             }
@@ -366,7 +364,33 @@ namespace eosio { namespace chain { namespace backing_store {
    }
 
    int32_t db_context_rocksdb::db_find_i64(uint64_t code, uint64_t scope, uint64_t table, uint64_t id) {
-      return find_i64(name{code}, name{scope}, name{table}, id, comp::equals);
+      const name code_name {code};
+      const name scope_name {scope};
+      const name table_name {table};
+      const unique_table t { code_name, scope_name, table_name };
+      const auto table_ei = primary_iter_store.cache_table(t);
+
+      key_bundle primary_key { db_key_value_format::create_primary_key(scope_name, table_name, id), code_name };
+      auto value = current_session.read(primary_key.full_key);
+      if (!value) {
+         // check if there is a table key to determine if we can return an end iterator
+         key_bundle table_key {db_key_value_format::create_table_key(scope_name, table_name), code_name };
+         auto table_value = current_session.read(table_key.full_key);
+         if (table_value) {
+            return table_ei;
+         }
+         else {
+            // since no table entry found the table is empty
+            return primary_iter_store.invalid_iterator();
+         }
+      }
+
+      payer_payload pp(*value);
+      const account_name found_payer = pp.payer;
+
+      const auto store_itr = primary_iter_store.add(primary_key_iter(table_ei, id, found_payer));
+      primary_iter_store.set_value(store_itr, pp.value, pp.value_size);
+      return store_itr;
    }
 
    int32_t db_context_rocksdb::db_lowerbound_i64(uint64_t code, uint64_t scope, uint64_t table, uint64_t id) {
@@ -658,7 +682,7 @@ namespace eosio { namespace chain { namespace backing_store {
       return { primary_key, end_of_prefix::at_type, code };
    }
 
-   pv_bundle db_context_rocksdb::get_primary_key_value(name code, name scope, name table, uint64_t id) const {
+   pv_bundle db_context_rocksdb::get_primary_key_value(name code, name scope, name table, uint64_t id) {
       prefix_bundle primary_key = get_primary_slice_in_primaries(code, scope, table, id);
       return { primary_key, current_session.read(primary_key.full_key) };
    }
@@ -667,7 +691,7 @@ namespace eosio { namespace chain { namespace backing_store {
       current_session.write(primary_key, pp.as_payload());
    }
 
-   int32_t db_context_rocksdb::find_and_store_primary_key(const session_type::iterator& session_iter,
+   int32_t db_context_rocksdb::find_and_store_primary_key(const session_variant_type::iterator& session_iter,
                                                           int32_t table_ei, const shared_bytes& type_prefix,
                                                           int32_t not_found_return, const char* calling_func,
                                                           uint64_t& found_key) {
@@ -679,9 +703,13 @@ namespace eosio { namespace chain { namespace backing_store {
                   "invariant failure in ${func}, iter store found to update but no primary keys in database",
                   ("func", calling_func));
 
-      const account_name found_payer = payer_payload(*(*session_iter).second).payer;
+      auto value = *(*session_iter).second; // copy the value out so it remains persistent
+      payer_payload pp(value);
+      const account_name found_payer = pp.payer;
+      const auto store_itr = primary_iter_store.add(primary_key_iter(table_ei, found_key, found_payer));
+      primary_iter_store.set_value(store_itr, pp.value, pp.value_size);
 
-      return primary_iter_store.add(primary_key_iter(table_ei, found_key, found_payer));
+      return store_itr;
    }
 
    // returns the exact iterator and the bounding key (type)
@@ -695,13 +723,13 @@ namespace eosio { namespace chain { namespace backing_store {
 
    int32_t db_context_rocksdb::find_i64(name code, name scope, name table, uint64_t id, comp comparison) {
       // expanding the "in-play" iterator space to include every key type for that table, to ensure we know if
-      // the key is not found, that there is anything in the table at all (and thus can return an end iterator
+      // the key is not found, that there is anything in the table at all (and thus can return an end iterator)
       // or if an invalid iterator needs to be returned
       prefix_bundle primary_and_prefix_keys { db_key_value_format::create_primary_key(scope, table, id),
                                               end_of_prefix::pre_type, code };
       auto session_iter = current_session.lower_bound(primary_and_prefix_keys.full_key);
       auto is_in_table = [&prefix_key=primary_and_prefix_keys.prefix_key,
-                          &primary_lookup=this->primary_lookup](const session_type::iterator& iter) {
+                          &primary_lookup=this->primary_lookup](const session_variant_type::iterator& iter) {
          return primary_lookup.match_prefix(prefix_key, iter);
       };
       if (!is_in_table(session_iter)) {
@@ -717,10 +745,7 @@ namespace eosio { namespace chain { namespace backing_store {
 
       std::optional<uint64_t> primary_key;
       if (!primary_lookup.match(primary_and_prefix_keys.full_key, (*session_iter).first)) {
-         if (comparison == comp::equals) {
-            return table_ei;
-         }
-         else if (!primary_lookup.match_prefix(desired_type_prefix, (*session_iter).first)) {
+         if (!primary_lookup.match_prefix(desired_type_prefix, (*session_iter).first)) {
             return table_ei;
          }
       }
@@ -738,7 +763,9 @@ namespace eosio { namespace chain { namespace backing_store {
          primary_key = id;
       }
 
-      const account_name found_payer = payer_payload(*(*session_iter).second).payer;
+      auto value = *(*session_iter).second; // copy the value out so it remains persistent
+      payer_payload pp(value);
+      const account_name found_payer = pp.payer;
       if (!primary_key) {
          uint64_t key = 0;
          const auto valid = db_key_value_format::get_primary_key((*session_iter).first, desired_type_prefix, key);
@@ -746,16 +773,18 @@ namespace eosio { namespace chain { namespace backing_store {
                      "invariant failure in find_i64, primary key already verified but method indicates it is not a primary key");
          primary_key = key;
       }
+      const auto store_itr = primary_iter_store.add(primary_key_iter(table_ei, *primary_key, found_payer));
+      primary_iter_store.set_value(store_itr, pp.value, pp.value_size);
 
-      return primary_iter_store.add(primary_key_iter(table_ei, *primary_key, found_payer));
+      return store_itr;
    }
 
    std::unique_ptr<db_context> create_db_rocksdb_context(apply_context& context, name receiver,
-                                                         db_context_rocksdb::session_type& session)
+                                                         db_context_rocksdb::session_variant_type session)
    {
       static_assert(std::is_convertible<db_context_rocksdb *, db_context *>::value, "cannot convert");
       static_assert(std::is_convertible<std::default_delete<db_context_rocksdb>, std::default_delete<db_context> >::value, "cannot convert delete");
-      return std::make_unique<db_context_rocksdb>(context, receiver, session);
+      return std::make_unique<db_context_rocksdb>(context, receiver, std::move(session));
    }
 
 }}} // namespace eosio::chain::backing_store

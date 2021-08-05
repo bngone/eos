@@ -159,8 +159,9 @@ namespace eosio { namespace chain {
          p.auth         = auth;
 
          if (auto dm_logger = _control.get_deep_mind_logger()) {
-            fc_dlog(*dm_logger, "PERM_OP INS ${action_id} ${data}",
+            fc_dlog(*dm_logger, "PERM_OP INS ${action_id} ${permission_id} ${data}",
                ("action_id", action_id)
+               ("permission_id", p.id)
                ("data", p)
             );
          }
@@ -198,8 +199,9 @@ namespace eosio { namespace chain {
          p.auth         = std::move(auth);
 
          if (auto dm_logger = _control.get_deep_mind_logger()) {
-            fc_dlog(*dm_logger, "PERM_OP INS ${action_id} ${data}",
+            fc_dlog(*dm_logger, "PERM_OP INS ${action_id} ${permission_id} ${data}",
                ("action_id", action_id)
+               ("permission_id", p.id)
                ("data", p)
             );
          }
@@ -224,8 +226,9 @@ namespace eosio { namespace chain {
          po.last_updated = _control.pending_block_time();
 
          if (auto dm_logger = _control.get_deep_mind_logger()) {
-            fc_dlog(*dm_logger, "PERM_OP UPD ${action_id} ${data}",
+            fc_dlog(*dm_logger, "PERM_OP UPD ${action_id} ${permission_id} ${data}",
                ("action_id", action_id)
+               ("permission_id", po.id)
                ("data", fc::mutable_variant_object()
                   ("old", old_permission)
                   ("new", po)
@@ -244,8 +247,9 @@ namespace eosio { namespace chain {
       _db.get_mutable_index<permission_usage_index>().remove_object( permission.usage_id._id );
 
       if (auto dm_logger = _control.get_deep_mind_logger()) {
-         fc_dlog(*dm_logger, "PERM_OP REM ${action_id} ${data}",
+         fc_dlog(*dm_logger, "PERM_OP REM ${action_id} ${permission_id} ${data}",
               ("action_id", action_id)
+              ("permission_id", permission.id)
               ("data", permission)
          );
       }
@@ -479,6 +483,7 @@ namespace eosio { namespace chain {
    void
    authorization_manager::check_authorization( const vector<action>&                actions,
                                                const flat_set<public_key_type>&     provided_keys,
+                                               std::optional<resource_payer_t>      payer,
                                                const flat_set<permission_level>&    provided_permissions,
                                                fc::microseconds                     provided_delay,
                                                const std::function<void()>&         _checktime,
@@ -547,6 +552,9 @@ namespace eosio { namespace chain {
                }
             }
          }
+      }
+      if (payer) {
+         permissions_to_satisfy.emplace(permission_level{payer->payer, config::active_name},effective_provided_delay);
       }
 
       // Now verify that all the declared authorizations are satisfied:

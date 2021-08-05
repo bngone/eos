@@ -23,6 +23,11 @@ void deferred_transaction_generation_context::reflector_init() {
       );
 }
 
+void resource_payer::reflector_init() {
+   static_assert( fc::raw::has_feature_reflector_init_on_unpacked_reflected_types,
+                  "resource_payer expects FC to support reflector_init" );
+}
+
 void transaction_header::set_reference_block( const block_id_type& reference_block ) {
    ref_block_num    = fc::endian_reverse_u32(reference_block._hash[0]);
    ref_block_prefix = reference_block._hash[1];
@@ -76,6 +81,54 @@ fc::microseconds transaction::get_signature_keys( const vector<signature_type>& 
 
    return fc::time_point::now() - start;
 } FC_CAPTURE_AND_RETHROW() }
+
+account_name transaction::resource_payer(bool is_resource_payer_pf_activated)const {
+   account_name resource_payer;
+
+   bool payer_was_set = false;
+
+   if(is_resource_payer_pf_activated) {
+      // Check for the existence of an extension of the type resource_payer
+      auto extensions = validate_and_extract_extensions();
+
+
+      if(!extensions.empty()) {
+         auto itr = extensions.lower_bound(resource_payer::extension_id());
+         if(itr != extensions.end()) {
+            const auto& resource_payer_info = std::get<eosio::chain::resource_payer>(itr->second);
+            resource_payer = resource_payer_info.payer;
+            payer_was_set = true;
+         }
+      }
+   }
+
+   if(!payer_was_set) {
+      resource_payer = first_authorizer();
+   }
+
+   return resource_payer;
+}
+
+std::optional<resource_payer_t> transaction::resource_payer_info( bool is_resource_payer_pf_activated ) const {
+
+   // Check for the existence of an extension of the type resource_payer
+   bool has_res_pyr = false;
+   resource_payer_t res_pyr;
+
+   if( is_resource_payer_pf_activated && transaction_extensions.size() > 0 ) {
+       std::find_if( transaction_extensions.begin(), transaction_extensions.end(),
+                     [&](auto& elem) {
+                        bool ret = elem.first == transaction_extension_id::resource_payer_id;
+                        if (ret) {
+                           fc::raw::unpack(elem.second, res_pyr);
+                           has_res_pyr = true;
+                        }
+                        return ret;
+                     } );
+   }
+
+   return has_res_pyr ? std::optional<resource_payer_t>(res_pyr) : std::nullopt;
+}
 
 flat_multimap<uint16_t, transaction_extension> transaction::validate_and_extract_extensions()const {
    using decompose_t = transaction_extension_types::decompose_t;
@@ -484,6 +537,7 @@ packed_transaction::packed_transaction(const packed_transaction_v0& other, bool 
    unpacked_trx(other.unpacked_trx),
    trx_id(other.id())
 {
+   EOS_ASSERT( legacy, transaction_exception, "Full type of prunable_data_type is not supported" );
    estimated_size = calculate_estimated_size();
 }
 
@@ -498,16 +552,18 @@ packed_transaction::packed_transaction(packed_transaction_v0&& other, bool legac
    unpacked_trx(std::move(other.unpacked_trx)),
    trx_id(other.id())
 {
+   EOS_ASSERT( legacy, transaction_exception, "Full type of prunable_data_type is not supported" );
    estimated_size = calculate_estimated_size();
 }
 
 packed_transaction_v0_ptr packed_transaction::to_packed_transaction_v0() const {
    const auto* sigs = get_signatures();
-   const auto* context_free_data = get_context_free_data();
-   signed_transaction strx( transaction( get_transaction() ),
+   EOS_ASSERT( std::holds_alternative<packed_transaction::prunable_data_type::full_legacy>(prunable_data.prunable_data), transaction_exception, "Failed to get full_legacy variant in to_packed_transaction_v0" );
+   auto& legacy = std::get<prunable_data_type::full_legacy>(prunable_data.prunable_data);
+   return std::make_shared<const packed_transaction_v0>( packed_trx,
                             sigs != nullptr ? *sigs : vector<signature_type>(),
-                            context_free_data != nullptr ? *context_free_data : vector<bytes>() );
-   return std::make_shared<const packed_transaction_v0>( std::move( strx ), get_compression() );
+                            legacy.packed_context_free_data,
+                            compression);
 }
 
 uint32_t packed_transaction::get_unprunable_size()const {

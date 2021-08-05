@@ -71,7 +71,6 @@ FC_REFLECT_EMPTY(provereset);
 
 BOOST_AUTO_TEST_SUITE(wasm_tests)
 
-#warning Change this back to using TESTER
 struct old_wasm_tester : tester {
    old_wasm_tester() : tester{setup_policy::old_wasm_parser} {}
 };
@@ -587,6 +586,24 @@ BOOST_FIXTURE_TEST_CASE( entry_import, TESTER ) try {
    BOOST_CHECK_THROW(push_transaction(trx), abort_called);
 } FC_LOG_AND_RETHROW()
 
+BOOST_FIXTURE_TEST_CASE( entry_db, TESTER ) try {
+   create_accounts( {"entrydb"_n} );
+   produce_block();
+
+   set_code("entrydb"_n, entry_db_wast);
+
+   signed_transaction trx;
+   action act;
+   act.account = "entrydb"_n;
+   act.name = ""_n;
+   act.authorization = vector<permission_level>{{"entrydb"_n,config::active_name}};
+   trx.actions.push_back(act);
+
+   set_transaction_headers(trx);
+   trx.sign(get_private_key( "entrydb"_n, "active" ), control->get_chain_id());
+   push_transaction(trx);
+} FC_LOG_AND_RETHROW()
+
 /**
  * Ensure we can load a wasm w/o memory
  */
@@ -732,6 +749,11 @@ BOOST_FIXTURE_TEST_CASE( table_init_oob, TESTER ) try {
 
    //an elem w/o a table is a setcode fail though
    BOOST_CHECK_THROW(set_code("tableinitoob"_n, table_init_oob_no_table_wast), eosio::chain::wasm_exception);
+
+   set_code("tableinitoob"_n, table_init_oob_empty_wast);
+   produce_block();
+   pushit_and_expect_fail();
+   pushit_and_expect_fail();
 
 } FC_LOG_AND_RETHROW()
 
@@ -1776,6 +1798,56 @@ BOOST_FIXTURE_TEST_CASE( varuint_memory_flags_tests, old_wasm_tester ) try {
    BOOST_REQUIRE_THROW(set_code("memflags"_n, varuint_memory_flags), wasm_exception);
 } FC_LOG_AND_RETHROW()
 
+static char reset_memory_fail1_wast[] = R"======(
+(module
+ (memory 2)
+ (func (export "apply") (param i64 i64 i64))
+)
+)======";
+
+// In a previous version of eos-vm, this would leave
+// memory incorrectly accessible to the next action.
+static char reset_memory_fail2_wast[] = R"======(
+(module
+ (memory 2)
+ (table 1 anyfunc)
+ (func $apply (export "apply") (param i64 i64 i64))
+ (elem (i32.const 1) $apply)
+)
+)======";
+
+static char reset_memory_fail3_wast[] = R"======(
+(module
+ (memory 1)
+ (func (export "apply") (param i64 i64 i64)
+  (i64.store (i32.const 65536) (i64.const 0))
+ )
+)
+)======";
+
+BOOST_FIXTURE_TEST_CASE( reset_memory_fail, TESTER ) try {
+   produce_block();
+   create_accounts( {"usemem"_n, "resetmem"_n, "accessmem"_n} );
+   produce_block();
+
+   set_code("usemem"_n, reset_memory_fail1_wast);
+   set_code("resetmem"_n, reset_memory_fail2_wast);
+   set_code("accessmem"_n, reset_memory_fail3_wast);
+   produce_block();
+
+   auto pushit = [&](name acct) {
+      signed_transaction trx;
+      trx.actions.push_back({ { { acct, config::active_name } }, acct, ""_n, bytes() });
+      set_transaction_headers(trx);
+      trx.sign(get_private_key( acct, "active" ), control->get_chain_id());
+      push_transaction(trx);
+   };
+   pushit("usemem"_n);
+   BOOST_CHECK_THROW(pushit("resetmem"_n), wasm_execution_error);
+   BOOST_CHECK_THROW(pushit("accessmem"_n), wasm_execution_error);
+   produce_block();
+} FC_LOG_AND_RETHROW()
+
 // TODO: Update to use eos-vm once merged
 BOOST_AUTO_TEST_CASE( code_size )  try {
    using namespace IR;
@@ -1826,13 +1898,13 @@ BOOST_AUTO_TEST_CASE( billed_cpu_test ) try {
       trx.max_cpu_usage_ms = trx_max_ms;
       trx.sign( chain.get_private_key( acc, "active" ), chain.control->get_chain_id() );
       auto ptrx = std::make_shared<packed_transaction>(std::move(trx), true);
-      auto fut = transaction_metadata::start_recover_keys( ptrx, chain.control->get_thread_pool(), chain.control->get_chain_id(), fc::microseconds::maximum() );
+      auto fut = transaction_metadata::start_recover_keys( ptrx, chain.control->get_thread_pool(), chain.control->get_chain_id(), fc::microseconds::maximum(), transaction_metadata::trx_type::input );
       return fut.get();
    };
 
    auto push_trx = [&]( const transaction_metadata_ptr& trx, fc::time_point deadline,
-                     uint32_t billed_cpu_time_us, bool explicit_billed_cpu_time ) {
-      auto r = chain.control->push_transaction( trx, deadline, billed_cpu_time_us, explicit_billed_cpu_time );
+                     uint32_t billed_cpu_time_us, bool explicit_billed_cpu_time, uint32_t subjective_cpu_bill_us ) {
+      auto r = chain.control->push_transaction( trx, deadline, billed_cpu_time_us, explicit_billed_cpu_time, subjective_cpu_bill_us );
       if( r->except_ptr ) std::rethrow_exception( r->except_ptr );
       if( r->except ) throw *r->except;
       return r;
@@ -1840,7 +1912,7 @@ BOOST_AUTO_TEST_CASE( billed_cpu_test ) try {
 
    auto ptrx = create_trx(0);
    // no limits, just verifying trx works
-   push_trx( ptrx, fc::time_point::maximum(), 0, false ); // non-explicit billing
+   push_trx( ptrx, fc::time_point::maximum(), 0, false, 0 ); // non-explicit billing
 
    // setup account acc with large limits
    chain.push_action( config::system_account_name, "setalimits"_n, config::system_account_name, fc::mutable_variant_object()
@@ -1866,7 +1938,7 @@ BOOST_AUTO_TEST_CASE( billed_cpu_test ) try {
    ptrx = create_trx(0);
    BOOST_CHECK_LT( max_cpu_time_us, cpu_limit ); // max_cpu_time_us has to be less than cpu_limit to actually test max and not account
    // indicate explicit billing at transaction max, max_cpu_time_us has to be greater than account cpu time
-   push_trx( ptrx, fc::time_point::maximum(), max_cpu_time_us, true );
+   push_trx( ptrx, fc::time_point::maximum(), max_cpu_time_us, true, 0 );
    chain.produce_block();
 
    cpu_limit = mgr.get_account_cpu_limit(acc).first;
@@ -1875,14 +1947,14 @@ BOOST_AUTO_TEST_CASE( billed_cpu_test ) try {
    ptrx = create_trx(0);
    BOOST_CHECK_LT( max_cpu_time_us + 1, cpu_limit ); // max_cpu_time_us+1 has to be less than cpu_limit to actually test max and not account
    // indicate explicit billing at max + 1
-   BOOST_CHECK_EXCEPTION( push_trx( ptrx, fc::time_point::maximum(), max_cpu_time_us + 1, true ), tx_cpu_usage_exceeded,
+   BOOST_CHECK_EXCEPTION( push_trx( ptrx, fc::time_point::maximum(), max_cpu_time_us + 1, true, 0 ), tx_cpu_usage_exceeded,
                           fc_exception_message_starts_with( "billed") );
 
    // allow to bill at trx configured max
    ptrx = create_trx(5); // set trx max at 5ms
    BOOST_CHECK_LT( 5 * 1000, cpu_limit ); // 5ms has to be less than cpu_limit to actually test trx max and not account
    // indicate explicit billing at max
-   push_trx( ptrx, fc::time_point::maximum(), 5 * 1000, true );
+   push_trx( ptrx, fc::time_point::maximum(), 5 * 1000, true, 0 );
    chain.produce_block();
 
    cpu_limit = mgr.get_account_cpu_limit(acc).first; // update after last trx
@@ -1891,19 +1963,19 @@ BOOST_AUTO_TEST_CASE( billed_cpu_test ) try {
    ptrx = create_trx(5); // set trx max at 5ms
    BOOST_CHECK_LT( 5 * 1000 + 1, cpu_limit ); // 5ms has to be less than cpu_limit to actually test trx max and not account
    // indicate explicit billing at max + 1
-   BOOST_CHECK_EXCEPTION( push_trx( ptrx, fc::time_point::maximum(), 5 * 1000 + 1, true ), tx_cpu_usage_exceeded,
+   BOOST_CHECK_EXCEPTION( push_trx( ptrx, fc::time_point::maximum(), 5 * 1000 + 1, true, 0 ), tx_cpu_usage_exceeded,
                           fc_exception_message_starts_with("billed") );
 
    // bill at minimum
    ptrx = create_trx(0);
    // indicate explicit billing at transaction minimum
-   push_trx( ptrx, fc::time_point::maximum(), min_cpu_time_us, true );
+   push_trx( ptrx, fc::time_point::maximum(), min_cpu_time_us, true, 0 );
    chain.produce_block();
 
    // do not allow to bill less than minimum
    ptrx = create_trx(0);
    // indicate explicit billing at minimum-1, objective failure even with explicit billing for under min
-   BOOST_CHECK_EXCEPTION( push_trx( ptrx, fc::time_point::maximum(), min_cpu_time_us - 1, true ), transaction_exception,
+   BOOST_CHECK_EXCEPTION( push_trx( ptrx, fc::time_point::maximum(), min_cpu_time_us - 1, true, 0 ), transaction_exception,
                           fc_exception_message_starts_with("cannot bill CPU time less than the minimum") );
 
    chain.push_action( config::system_account_name, "setalimits"_n, config::system_account_name, fc::mutable_variant_object()
@@ -1917,18 +1989,13 @@ BOOST_AUTO_TEST_CASE( billed_cpu_test ) try {
    chain.produce_block( fc::days(1) ); // produce for one day to reset account cpu
 
    cpu_limit = mgr.get_account_cpu_limit_ex(acc).first.max;
-
-   ptrx = create_trx(0);
-   BOOST_CHECK_LT( cpu_limit+1, max_cpu_time_us ); // needs to be less or this just tests the same thing as max_cpu_time_us test above
-   // indicate non-explicit billing with 1 more than our account cpu limit, triggers optimization check #8638 and fails trx
-   BOOST_CHECK_EXCEPTION( push_trx( ptrx, fc::time_point::maximum(), cpu_limit+1, false ), tx_cpu_usage_exceeded,
-                          fc_exception_message_starts_with("estimated") );
+   cpu_limit -= EOS_PERCENT( cpu_limit, 10 * config::percent_1 ); // transaction_context verifies within 10%, so subtract 10% out
 
    ptrx = create_trx(0);
    BOOST_CHECK_LT( cpu_limit, max_cpu_time_us );
-   // indicate non-explicit billing at our account cpu limit, will allow this trx to run, but only bills for actual use
-   auto r = push_trx( ptrx, fc::time_point::maximum(), cpu_limit, false );
-   BOOST_CHECK_LT( r->receipt->cpu_usage_us, cpu_limit ); // verify not billed at provided bill amount when explicit_billed_cpu_time=false
+   // indicate non-explicit billing at one less than our account cpu limit, will allow this trx to run, but only bills for actual use
+   auto r = push_trx( ptrx, fc::time_point::maximum(), cpu_limit-1, false, 0 );
+   BOOST_CHECK_LT( r->receipt->cpu_usage_us, cpu_limit-1 ); // verify not billed at provided bill amount when explicit_billed_cpu_time=false
 
    chain.produce_block();
    chain.produce_block( fc::days(1) ); // produce for one day to reset account cpu
@@ -1937,8 +2004,66 @@ BOOST_AUTO_TEST_CASE( billed_cpu_test ) try {
    BOOST_CHECK_LT( cpu_limit+1, max_cpu_time_us ); // needs to be less or this just tests the same thing as max_cpu_time_us test above
    // indicate explicit billing at over our account cpu limit, not allowed
    cpu_limit = mgr.get_account_cpu_limit_ex(acc).first.max;
-   BOOST_CHECK_EXCEPTION( push_trx( ptrx, fc::time_point::maximum(), cpu_limit+1, true ), tx_cpu_usage_exceeded,
+   BOOST_CHECK_EXCEPTION( push_trx( ptrx, fc::time_point::maximum(), cpu_limit+1, true, 0 ), tx_cpu_usage_exceeded,
                           fc_exception_message_starts_with("billed") );
+
+   // leeway and subjective billing interaction tests
+   auto leeway = fc::microseconds(config::default_subjective_cpu_leeway_us);
+   chain.control->set_subjective_cpu_leeway(leeway);
+
+   // Allow transaction with billed cpu less than 90% of (account cpu limit + leeway - subjective bill)
+   chain.produce_block();
+   chain.produce_block( fc::days(1) ); // produce for one day to reset account cpu
+   ptrx = create_trx(0);
+   uint32_t combined_cpu_limit = mgr.get_account_cpu_limit_ex(acc).first.max + leeway.count();
+   uint32_t subjective_cpu_bill_us = leeway.count();
+   uint32_t billed_cpu_time_us = EOS_PERCENT( (combined_cpu_limit - subjective_cpu_bill_us), 89 *config::percent_1 );
+   push_trx( ptrx, fc::time_point::maximum(), billed_cpu_time_us, false, subjective_cpu_bill_us );
+
+   // Allow transaction with billed cpu less than 90% of (account cpu limit + leeway) if subject bill is 0
+   chain.control->set_subjective_cpu_leeway(leeway);
+   chain.produce_block();
+   chain.produce_block( fc::days(1) ); // produce for one day to reset account cpu
+   ptrx = create_trx(0);
+   combined_cpu_limit = mgr.get_account_cpu_limit_ex(acc).first.max + leeway.count();
+   subjective_cpu_bill_us = 0;
+   billed_cpu_time_us = EOS_PERCENT( combined_cpu_limit - subjective_cpu_bill_us, 89 *config::percent_1 );
+   push_trx( ptrx, fc::time_point::maximum(), billed_cpu_time_us, false, subjective_cpu_bill_us );
+
+   // Disallow transaction with billed cpu equal to 90% of (account cpu limit + leeway - subjective bill)
+   chain.produce_block();
+   chain.produce_block( fc::days(1) ); // produce for one day to reset account cpu
+   ptrx = create_trx(0);
+   cpu_limit = mgr.get_account_cpu_limit_ex(acc).first.max;
+   combined_cpu_limit = cpu_limit + leeway.count();
+   subjective_cpu_bill_us = cpu_limit;
+   billed_cpu_time_us = EOS_PERCENT( combined_cpu_limit - subjective_cpu_bill_us, 90 * config::percent_1 );
+   BOOST_CHECK_EXCEPTION(push_trx( ptrx, fc::time_point::maximum(), billed_cpu_time_us, false, subjective_cpu_bill_us ), tx_cpu_usage_exceeded,
+                         fc_exception_message_starts_with("estimated") );
+
+   // Disallow transaction with billed cpu greater 90% of (account cpu limit + leeway - subjective bill)
+   subjective_cpu_bill_us = 0;
+   billed_cpu_time_us = EOS_PERCENT( combined_cpu_limit - subjective_cpu_bill_us, 91 * config::percent_1 );
+   BOOST_CHECK_EXCEPTION(push_trx( ptrx, fc::time_point::maximum(), billed_cpu_time_us, false, subjective_cpu_bill_us ), tx_cpu_usage_exceeded,
+                         fc_exception_message_starts_with("estimated") );
+
+   // Test when cpu limit is 0
+   chain.push_action( config::system_account_name, "setalimits"_n, config::system_account_name, fc::mutable_variant_object()
+           ("account", acc)
+           ("ram_bytes", -1)
+           ("net_weight", 75)
+           ("cpu_weight", 0)
+   );
+
+   chain.produce_block();
+   chain.produce_block( fc::days(1) ); // produce for one day to reset account cpu
+
+   // Allow transaction with billed cpu less than 90% of leeway subjective bill being 0 to run but fail it if no cpu is staked afterwards
+   ptrx = create_trx(0);
+   subjective_cpu_bill_us = 0;
+   billed_cpu_time_us = EOS_PERCENT( leeway.count(), 89 *config::percent_1 );
+   BOOST_CHECK_EXCEPTION(push_trx( ptrx, fc::time_point::maximum(), billed_cpu_time_us, false, subjective_cpu_bill_us ), tx_cpu_usage_exceeded,
+                         fc_exception_message_starts_with("billed") );
 
 } FC_LOG_AND_RETHROW()
 

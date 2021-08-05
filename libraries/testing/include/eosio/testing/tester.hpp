@@ -225,6 +225,7 @@ namespace eosio { namespace testing {
                                                const variant_object& data,
                                                uint32_t expiration = DEFAULT_EXPIRATION_DELTA,
                                                uint32_t delay_sec = 0 );
+         transaction_trace_ptr    push_action_no_produce(action&& act, uint64_t authorizer);
 
 
          action get_action( account_name code, action_name acttype, vector<permission_level> auths,
@@ -354,31 +355,6 @@ namespace eosio { namespace testing {
 
          void sync_with(base_tester& other);
 
-         const table_id_object* find_table( name code, name scope, name table );
-
-         // method treats key as a name type, if this is not appropriate in your case, pass require == false and report the correct behavior
-         template<typename Object>
-         bool get_table_entry(Object& obj, account_name code, account_name scope, account_name table, uint64_t key, bool require = true) {
-            auto* maybe_tid = find_table(code, scope, table);
-            if( maybe_tid == nullptr ) {
-               BOOST_FAIL( "table for code=\"" + code.to_string()
-                            + "\" scope=\"" + scope.to_string()
-                            + "\" table=\"" + table.to_string()
-                            + "\" does not exist"                 );
-            }
-
-            auto* o = control->db().find<key_value_object, by_scope_primary>(boost::make_tuple(maybe_tid->id, key));
-            if( o == nullptr ) {
-               if( require )
-                  BOOST_FAIL("object does not exist for primary_key=\"" + name(key).to_string() + "\"");
-
-               return false;
-            }
-
-            fc::raw::unpack(o->value.data(), o->value.size(), obj);
-            return true;
-         }
-
          const controller::config& get_config() const {
             return cfg;
          }
@@ -406,8 +382,6 @@ namespace eosio { namespace testing {
             cfg.state_dir  = tempdir.path() / config::default_state_dir_name;
             cfg.state_size = 1024*1024*16;
             cfg.state_guard_size = 0;
-            cfg.reversible_cache_size = 1024*1024*8;
-            cfg.reversible_guard_size = 0;
             cfg.contracts_console = true;
             cfg.eosvmoc_config.cache_size = 1024*1024*8;
 
@@ -507,6 +481,10 @@ namespace eosio { namespace testing {
       tester(const std::function<void(controller&)>& control_setup, setup_policy policy = setup_policy::full,
              db_read_mode read_mode = db_read_mode::SPECULATIVE);
 
+      tester(const std::function<void(tester&)>& lambda) {
+         lambda(*this);
+      }
+
       using base_tester::produce_block;
 
       signed_block_ptr produce_block( fc::microseconds skip_time = fc::milliseconds(config::block_interval_ms) )override {
@@ -572,19 +550,8 @@ namespace eosio { namespace testing {
          return validating_node;
       }
 
-      validating_tester(const fc::temp_directory& tempdir, bool use_genesis) {
-         auto def_conf = default_config(tempdir);
-         vcfg = def_conf.first;
-         config_validator(vcfg);
-         validating_node = create_validating_node(vcfg, def_conf.second, use_genesis);
-
-         if (use_genesis) {
-            init(def_conf.first, def_conf.second);
-         }
-         else {
-            init(def_conf.first);
-         }
-      }
+      validating_tester(const fc::temp_directory& tempdir, bool use_genesis,
+                        std::optional<backing_store_type> config_backing_store = std::optional<backing_store_type>{});
 
       template <typename Lambda>
       validating_tester(const fc::temp_directory& tempdir, Lambda conf_edit, bool use_genesis) {
@@ -601,6 +568,8 @@ namespace eosio { namespace testing {
             init(def_conf.first);
          }
       }
+
+      static backing_store_type alternate_type(backing_store_type type);
 
       signed_block_ptr produce_block( fc::microseconds skip_time = fc::milliseconds(config::block_interval_ms) )override {
          auto sb = _produce_block(skip_time, false);

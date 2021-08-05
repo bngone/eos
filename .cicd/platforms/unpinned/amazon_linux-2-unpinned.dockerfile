@@ -3,10 +3,10 @@ ENV VERSION 1
 # install dependencies.
 RUN yum update -y && \
     yum install -y which git sudo procps-ng util-linux autoconf automake \
-    libtool make bzip2 bzip2-devel openssl-devel gmp-devel libstdc++ libcurl-devel \
-    libusbx-devel python3 python3-devel python-devel libedit-devel doxygen \
-    graphviz clang patch llvm-devel llvm-static vim-common jq
-# build cmake
+    libtool make bzip2 bzip2-devel openssl openssl-devel gmp-devel libstdc++ libcurl-devel \
+    libusbx-devel python3 python3-devel python-devel python-requests python3-requests libedit-devel doxygen \
+    graphviz clang patch llvm-devel llvm-static vim-common jq postgresql-server postgresql-devel && \
+    yum clean all && rm -rf /var/cache/yum
 RUN curl -LO https://github.com/Kitware/CMake/releases/download/v3.16.2/cmake-3.16.2.tar.gz && \
     tar -xzf cmake-3.16.2.tar.gz && \
     cd cmake-3.16.2 && \
@@ -15,7 +15,7 @@ RUN curl -LO https://github.com/Kitware/CMake/releases/download/v3.16.2/cmake-3.
     make install && \
     rm -rf cmake-3.16.2.tar.gz cmake-3.16.2
 # build boost
-RUN curl -LO https://dl.bintray.com/boostorg/release/1.71.0/source/boost_1_71_0.tar.bz2 && \
+RUN curl -LO https://boostorg.jfrog.io/artifactory/main/release/1.71.0/source/boost_1_71_0.tar.bz2 && \
     tar -xjf boost_1_71_0.tar.bz2 && \
     cd boost_1_71_0 && \
     ./bootstrap.sh --prefix=/usr/local && \
@@ -31,3 +31,5 @@ RUN echo 'export NVM_DIR="$HOME/.nvm"' > ~/.bashrc && \
 RUN bash -c '. ~/.bashrc; nvm install --lts=dubnium' && \
     ln -s "/root/.nvm/versions/node/$(ls -p /root/.nvm/versions/node | sort -Vr | head -1)bin/node" /usr/local/bin/node && \
     ln -s "/root/.nvm/versions/node/$(ls -p /root/.nvm/versions/node | sort -Vr | head -1)bin/npm" /usr/local/bin/npm
+# setup Postgress
+RUN su - postgres -c initdb

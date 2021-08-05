@@ -12,10 +12,8 @@ typedef __uint128_t uint128_t;
 const static auto default_blocks_dir_name    = "blocks";
 const static auto default_blocks_archive_dir_name  = "archive";
 const static auto default_blocks_log_stride        = UINT32_MAX;
-const static auto default_max_retained_block_files = 10;
+const static auto default_max_retained_block_files = UINT32_MAX;
 const static auto reversible_blocks_dir_name       = "reversible";
-const static auto default_reversible_cache_size = 340*1024*1024ll;/// 1MB * 340 blocks based on 21 producer BFT delay
-const static auto default_reversible_guard_size = 2*1024*1024ll;/// 1MB * 340 blocks based on 21 producer BFT delay
 
 const static auto default_state_dir_name     = "state";
 const static auto forkdb_filename            = "fork_db.dat";
@@ -88,8 +86,11 @@ const static uint16_t   default_controller_thread_pool_size          = 2;
 const static uint32_t   default_max_variable_signature_length        = 16384u;
 const static uint32_t   default_max_nonprivileged_inline_action_size = 4 * 1024; // 4 KB
 const static uint32_t   default_max_action_return_value_size         = 256;
-const static int        default_rocksdb_max_open_files               = -1;
-const static uint64_t   default_rocksdb_write_buffer_size            = 128 * 1024 * 1024;
+const static uint16_t   default_persistent_storage_num_threads       = 1;
+const static int        default_persistent_storage_max_num_files     = -1;
+const static uint64_t   default_persistent_storage_write_buffer_size = 128 * 1024 * 1024;
+const static uint64_t   default_persistent_storage_bytes_per_sync    = 1 * 1024 * 1024;
+const static uint32_t   default_persistent_storage_mbytes_batch      = 50;
 
 static_assert(MAX_SIZE_OF_BYTE_ARRAYS == 20*1024*1024, "Changing MAX_SIZE_OF_BYTE_ARRAYS breaks consensus. Make sure this is expected");
 

@@ -5,10 +5,10 @@ RUN apt-get update && \
     apt-get upgrade -y && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y git make \
     bzip2 automake libbz2-dev libssl-dev doxygen graphviz libgmp3-dev \
-    autotools-dev python2.7 python2.7-dev python3 \
+    autotools-dev python2.7 python2.7-dev python3 python3-pip python3-requests \
     python3-dev python-configparser \
     autoconf libtool g++ gcc curl zlib1g-dev sudo ruby libusb-1.0-0-dev \
-    libcurl4-gnutls-dev pkg-config patch vim-common jq gnupg && \
+    libcurl4-gnutls-dev pkg-config patch vim-common jq gnupg libpq-dev postgresql postgresql-server-dev-all && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -34,13 +34,13 @@ RUN git clone --depth 1 --single-branch --branch llvmorg-10.0.0 https://github.c
     cd llvm/llvm && \
     mkdir build && \
     cd build && \
-    cmake -G 'Unix Makefiles' -DLLVM_TARGETS_TO_BUILD=host -DLLVM_BUILD_TOOLS=false -DLLVM_ENABLE_RTTI=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_TOOLCHAIN_FILE='/tmp/clang.cmake' -DCMAKE_EXE_LINKER_FLAGS=-pthread -DCMAKE_SHARED_LINKER_FLAGS=-pthread -DLLVM_ENABLE_PIC=NO -DLLVM_ENABLE_TERMINFO=OFF .. && \
+    cmake -G 'Unix Makefiles' -DLLVM_TARGETS_TO_BUILD=host -DLLVM_BUILD_TOOLS=false -DLLVM_ENABLE_RTTI=1 -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_TOOLCHAIN_FILE='/tmp/clang.cmake' -DCMAKE_EXE_LINKER_FLAGS=-pthread -DCMAKE_SHARED_LINKER_FLAGS=-pthread -DLLVM_ENABLE_PIC=NO -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_Z3_SOLVER=OFF .. && \
     make -j$(nproc) && \
     make install && \
     cd / && \
     rm -rf /llvm
 # build boost
-RUN curl -LO https://dl.bintray.com/boostorg/release/1.72.0/source/boost_1_72_0.tar.bz2 && \
+RUN curl -LO https://boostorg.jfrog.io/artifactory/main/release/1.72.0/source/boost_1_72_0.tar.bz2 && \
     tar -xjf boost_1_72_0.tar.bz2 && \
     cd boost_1_72_0 && \
     ./bootstrap.sh --with-toolset=clang --prefix=/usr/local && \

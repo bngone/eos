@@ -20,6 +20,30 @@ struct big_vector_wrapper {
    T obj;
 };
 
+template <typename ST>
+inline void pack_varuint64(ST& ds, uint64_t val) {
+   do {
+      uint8_t b = uint8_t(val) & 0x7f;
+      val >>= 7;
+      b |= ((val > 0) << 7);
+      ds.write((char*)&b, 1);
+   } while (val);
+}
+
+template <typename ST>
+void pack_big_bytes(ST& ds, const eosio::chain::bytes& v) {
+   pack_varuint64(ds, v.size());
+   if (v.size())
+      ds.write(&v.front(), v.size());
+}
+
+template <typename ST>
+void pack_big_bytes(ST& ds, const std::optional<eosio::chain::bytes>& v) {
+   fc::raw::pack(ds, v.has_value());
+   if (v)
+      pack_big_bytes(ds, *v);
+}
+
 template <typename T>
 class opaque {
    std::vector<char> data;
@@ -41,8 +65,12 @@ class opaque {
 
    template <typename ST>
    void pack_to(ST& ds) const {
-      fc::raw::pack(ds, this->data);
+      // we need to pack as big vector because it can be used to hold the state delta object
+      // which would be as large as the eos snapshot when the nodeos restarted from a snapshot.
+      pack_big_bytes(ds, this->data);
    }
+
+   bool has_value() const { return data.size(); }
 };
 
 struct augmented_transaction_trace {
@@ -65,9 +93,9 @@ struct augmented_transaction_trace {
 };
 
 struct table_delta {
-   fc::unsigned_int                                                       struct_version = 0;
-   std::string                                                            name{};
-   state_history::big_vector_wrapper<std::vector<std::pair<bool, bytes>>> rows{};
+   fc::unsigned_int                                                          struct_version = 1;
+   std::string                                                               name{};
+   state_history::big_vector_wrapper<std::vector<std::pair<uint8_t, bytes>>> rows{};
 };
 
 struct block_position {
@@ -87,6 +115,8 @@ struct get_status_result_v0 {
    fc::sha256     chain_id                = {};
 };
 
+struct get_blocks_result_v1;
+struct get_blocks_result_v2;
 struct get_blocks_request_v0 {
    uint32_t                    start_block_num        = 0;
    uint32_t                    end_block_num          = 0;
@@ -96,6 +126,17 @@ struct get_blocks_request_v0 {
    bool                        fetch_block            = false;
    bool                        fetch_traces           = false;
    bool                        fetch_deltas           = false;
+   using response_type                                = get_blocks_result_v1;
+};
+
+struct get_blocks_request_v1 : get_blocks_request_v0 {
+   bool fetch_block_header = false;
+
+   get_blocks_request_v1() = default;
+   get_blocks_request_v1(const get_blocks_request_v0& v0)
+       : get_blocks_request_v0(v0)
+       , fetch_block_header(false) {}
+   using response_type = get_blocks_result_v2;
 };
 
 struct get_blocks_ack_request_v0 {
@@ -112,7 +153,7 @@ struct get_blocks_result_v0 {
    std::optional<bytes>          deltas;
 };
 
-using state_request = std::variant<get_status_request_v0, get_blocks_request_v0, get_blocks_ack_request_v0>;
+using state_request = std::variant<get_status_request_v0, get_blocks_request_v0, get_blocks_ack_request_v0, get_blocks_request_v1>;
 
 struct account_auth_sequence {
    uint64_t account  = {};
@@ -187,7 +228,7 @@ struct partial_transaction_v0 {
    fc::unsigned_int                           max_net_usage_words    = {};
    uint8_t                                    max_cpu_usage_ms       = {};
    fc::unsigned_int                           delay_sec              = {};
-   std::vector<eosio::chain::extensions_type> transaction_extensions = {};
+   eosio::chain::extensions_type              transaction_extensions = {};
    std::vector<eosio::chain::signature_type>  signatures             = {};
    std::vector<bytes>                         context_free_data      = {};
 };
@@ -200,7 +241,7 @@ struct partial_transaction_v1 {
    fc::unsigned_int                           max_net_usage_words    = {};
    uint8_t                                    max_cpu_usage_ms       = {};
    fc::unsigned_int                           delay_sec              = {};
-   std::vector<eosio::chain::extensions_type> transaction_extensions = {};
+   eosio::chain::extensions_type              transaction_extensions = {};
    std::optional<prunable_data_type>          prunable_data          = {};
 };
 
@@ -233,19 +274,38 @@ struct transaction_trace_recurse {
    transaction_trace recurse;
 };
 
-using optional_signed_block = std::variant<chain::signed_block_v0_ptr, chain::signed_block_ptr>;
+using signed_block_ptr_variant = std::variant<chain::signed_block_v0_ptr, chain::signed_block_ptr>;
 
 struct get_blocks_result_v1 {
    block_position                head;
    block_position                last_irreversible;
    std::optional<block_position> this_block;
    std::optional<block_position> prev_block;
-   optional_signed_block         block; // packed as std::optional<fc::static_variant<signed_block_v0, signed_block>>
+   signed_block_ptr_variant      block; // packed as std::optional<std::variant<signed_block_v0, signed_block>>
    opaque<std::vector<transaction_trace>> traces;
    opaque<std::vector<table_delta>>       deltas;
+
+   bool has_value() const {
+      return std::visit([](auto b) -> bool { return b.get(); }, block) || traces.has_value() || deltas.has_value();
+   }
 };
 
-using state_result = std::variant<get_status_result_v0, get_blocks_result_v0, get_blocks_result_v1>;
+struct get_blocks_result_v2 {
+   block_position                head;
+   block_position                last_irreversible;
+   std::optional<block_position> this_block;
+   std::optional<block_position> prev_block;
+   signed_block_ptr_variant               block; // packed as opaque<fc::variant<signed_block_v0, signed_block>>
+   opaque<chain::signed_block_header>     block_header;
+   opaque<std::vector<transaction_trace>> traces;
+   opaque<std::vector<table_delta>>       deltas;
+   bool has_value() const {
+      return std::visit([](auto b) -> bool { return b.get(); }, block) || traces.has_value() || deltas.has_value() || block_header.has_value();
+   }
+};
+
+
+using state_result = std::variant<get_status_result_v0, get_blocks_result_v0, get_blocks_result_v1, get_blocks_result_v2>;
 
 } // namespace state_history
 } // namespace eosio
@@ -256,6 +316,7 @@ FC_REFLECT(eosio::state_history::block_position, (block_num)(block_id));
 FC_REFLECT_EMPTY(eosio::state_history::get_status_request_v0);
 FC_REFLECT(eosio::state_history::get_status_result_v0, (head)(last_irreversible)(trace_begin_block)(trace_end_block)(chain_state_begin_block)(chain_state_end_block)(chain_id));
 FC_REFLECT(eosio::state_history::get_blocks_request_v0, (start_block_num)(end_block_num)(max_messages_in_flight)(have_positions)(irreversible_only)(fetch_block)(fetch_traces)(fetch_deltas));
+FC_REFLECT_DERIVED(eosio::state_history::get_blocks_request_v1, (eosio::state_history::get_blocks_request_v0), (fetch_block_header));
 FC_REFLECT(eosio::state_history::get_blocks_ack_request_v0, (num_messages));
 
 FC_REFLECT(eosio::state_history::account_auth_sequence, (account)(sequence));

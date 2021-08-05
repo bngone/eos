@@ -143,8 +143,9 @@ namespace eosio { namespace chain {
          void schedule_transaction();
          void record_transaction( const transaction_id_type& id, fc::time_point_sec expire );
 
-         void validate_cpu_usage_to_bill( int64_t billed_us, int64_t account_cpu_limit, bool check_minimum )const;
-         void validate_account_cpu_usage( int64_t billed_us, int64_t account_cpu_limit, bool estimate )const;
+         void validate_cpu_usage_to_bill( int64_t billed_us, int64_t account_cpu_limit, bool check_minimum, std::optional<resource_payer_t>& res_pyr )const;
+         void validate_account_cpu_usage( int64_t billed_us, int64_t account_cpu_limit, std::optional<resource_payer_t>& res_pyr )const;
+         void validate_account_cpu_usage_estimate( int64_t billed_us, int64_t account_cpu_limit )const;
 
          void disallow_transaction_extensions( const char* error_msg )const;
 
@@ -176,6 +177,7 @@ namespace eosio { namespace chain {
          fc::time_point                deadline = fc::time_point::maximum();
          fc::microseconds              leeway = fc::microseconds( config::default_subjective_cpu_leeway_us );
          int64_t                       billed_cpu_time_us = 0;
+         uint32_t                      subjective_cpu_bill_us = 0;
          bool                          explicit_billed_cpu_time = false;
 
          transaction_checktime_timer   transaction_timer;

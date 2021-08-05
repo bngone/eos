@@ -4,13 +4,14 @@
 #include <eosio/chain/authorization_manager.hpp>
 #include <eosio/chain/block_state.hpp>
 #include <eosio/chain/chain_snapshot.hpp>
-#include <eosio/chain/fork_database.hpp>
 #include <eosio/chain/genesis_state.hpp>
 #include <eosio/chain/resource_limits.hpp>
 #include <eosio/chain/snapshot.hpp>
 
 #include <eosio/chain/account_object.hpp>
 #include <eosio/chain/backing_store.hpp>
+#include <eosio/chain/backing_store/chain_kv_payer.hpp>
+#include <eosio/chain/backing_store/db_key_value_format.hpp>
 #include <eosio/chain/block_summary_object.hpp>
 #include <eosio/chain/code_object.hpp>
 #include <eosio/chain/contract_table_objects.hpp>
@@ -20,12 +21,10 @@
 #include <eosio/chain/global_property_object.hpp>
 #include <eosio/chain/kv_chainbase_objects.hpp>
 #include <eosio/chain/protocol_state_object.hpp>
-#include <eosio/chain/reversible_block_object.hpp>
 #include <eosio/chain/transaction_object.hpp>
 #include <eosio/chain/whitelisted_intrinsics.hpp>
 #include <eosio/chain/controller.hpp>
 
-#include <b1/session/cache.hpp>
 #include <b1/session/rocks_session.hpp>
 #include <b1/session/session.hpp>
 #include <b1/session/undo_stack.hpp>
@@ -47,7 +46,7 @@ namespace eosio { namespace chain {
          index_set<account_index, account_metadata_index, account_ram_correction_index, global_property_multi_index,
                    protocol_state_multi_index, dynamic_global_property_multi_index, block_summary_multi_index,
                    transaction_multi_index, generated_transaction_multi_index, table_id_multi_index, code_index,
-                   database_header_multi_index, kv_db_config_index, kv_index>;
+                   database_header_multi_index, kv_db_config_index>;
 
    using contract_database_index_set = index_set<key_value_index, index64_index, index128_index, index256_index,
                                                  index_double_index, index_long_double_index>;
@@ -84,7 +83,8 @@ namespace eosio { namespace chain {
 
    class combined_database {
     public:
-      explicit combined_database(chainbase::database& chain_db);
+      explicit combined_database(chainbase::database& chain_db,
+                                 uint32_t snapshot_batch_threashold);
 
       combined_database(chainbase::database& chain_db,
                         const controller::config& cfg);
@@ -93,10 +93,9 @@ namespace eosio { namespace chain {
       combined_database& operator=(const combined_database& copy) = delete;
 
       // Save the backing_store setting to the chainbase in order to detect
-      // when this setting is switched from chainbase to rocksdb, in which
-      // case, check that no KV entries already exist in the chainbase.
-      // Otherwise, they would become unreachable.
-      void check_backing_store_setting();
+      // when this setting is switched between chainbase and rocksdb.
+      // If existing state is not clean, switching is not allowed.
+      void check_backing_store_setting(bool clean_startup);
 
       static combined_session make_no_op_session() { return combined_session(); }
 
@@ -106,14 +105,18 @@ namespace eosio { namespace chain {
 
       void set_revision(uint64_t revision);
 
+      int64_t revision();
+
       void undo();
 
       void commit(int64_t revision);
 
       void flush();
 
+      static void destroy(const fc::path& p);
+
       std::unique_ptr<kv_context> create_kv_context(name receiver, kv_resource_manager resource_manager,
-                                                    const kv_database_config& limits);
+                                                    const kv_database_config& limits)const;
 
       std::unique_ptr<db_context> create_db_context(apply_context& context, name receiver);
 
@@ -124,8 +127,42 @@ namespace eosio { namespace chain {
       void read_from_snapshot(const snapshot_reader_ptr& snapshot, uint32_t blog_start, uint32_t blog_end,
                               eosio::chain::authorization_manager& authorization,
                               eosio::chain::resource_limits::resource_limits_manager& resource_limits,
-                              eosio::chain::fork_database& fork_db, eosio::chain::block_state_ptr& head,
-                              uint32_t& snapshot_head_block, const eosio::chain::chain_id_type& chain_id);
+                              eosio::chain::block_state_ptr& head, uint32_t& snapshot_head_block,
+                              const eosio::chain::chain_id_type& chain_id);
+
+      auto &get_db(void) const { return db; }
+      auto &get_kv_undo_stack(void) const { return kv_undo_stack; }
+      backing_store_type get_backing_store() const { return backing_store; }
+
+      template<typename Lambda>
+      bool get_primary_key_data(name code, name scope, name table, uint64_t primary_key, Lambda&& process_data) const {
+         if (backing_store == backing_store_type::CHAINBASE) {
+            const auto* t_id = db.find<chain::table_id_object, chain::by_code_scope_table>( boost::make_tuple( code, scope, table ) );
+            if ( !t_id ) {
+               return false;
+            }
+
+            const auto* obj = db.find<chain::key_value_object, chain::by_scope_primary>(boost::make_tuple(t_id->id, primary_key) );
+
+            if (obj) {
+               return process_data(obj->payer, obj->value.data(), obj->value.size());
+            }
+         }
+         else {
+            using namespace eosio::chain;
+            EOS_ASSERT(backing_store == backing_store_type::ROCKSDB,
+                     chain::contract_table_query_exception,
+                     "Support for configured backing_store has not been added");
+            auto full_primary_key = chain::backing_store::db_key_value_format::create_full_primary_key(code, scope, table, primary_key);
+            auto session = get_kv_undo_stack()->top();
+            auto value = session.read(full_primary_key);
+            if (value) {
+               backing_store::payer_payload pp{value->data(), value->size()};
+               return process_data(pp.payer, pp.value, pp.value_size);
+            }
+         }
+	 return false;
+      }
 
     private:
       void add_contract_tables_to_snapshot(const snapshot_writer_ptr& snapshot) const;
@@ -135,11 +172,12 @@ namespace eosio { namespace chain {
       chainbase::database&                                       db;
       std::unique_ptr<rocks_db_type>                             kv_database;
       kv_undo_stack_ptr                                          kv_undo_stack;
+      const uint64_t                                             kv_snapshot_batch_threashold;
    };
 
    std::optional<eosio::chain::genesis_state> extract_legacy_genesis_state(snapshot_reader& snapshot, uint32_t version);
 
    std::vector<char> make_rocksdb_contract_kv_prefix();
-   std::vector<char> make_rocksdb_contract_db_prefix();
+   char make_rocksdb_contract_db_prefix();
 
 }} // namespace eosio::chain

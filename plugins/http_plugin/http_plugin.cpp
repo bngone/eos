@@ -1,7 +1,5 @@
 #include <eosio/http_plugin/http_plugin.hpp>
-#ifdef BOOST_ASIO_HAS_LOCAL_SOCKETS
 #include <eosio/http_plugin/local_endpoint.hpp>
-#endif
 #include <eosio/chain/exceptions.hpp>
 #include <eosio/chain/thread_utils.hpp>
 
@@ -54,7 +52,7 @@ namespace eosio {
 
    static http_plugin_defaults current_http_plugin_defaults;
 
-   void http_plugin::set_defaults(const http_plugin_defaults config) {
+   void http_plugin::set_defaults(const http_plugin_defaults& config) {
       current_http_plugin_defaults = config;
    }
 
@@ -94,7 +92,6 @@ namespace eosio {
           static const long timeout_open_handshake = 0;
       };
 
-#ifdef BOOST_ASIO_HAS_LOCAL_SOCKETS
       struct asio_local_with_stub_log : public websocketpp::config::asio {
           typedef asio_local_with_stub_log type;
           typedef asio base;
@@ -126,17 +123,17 @@ namespace eosio {
 
           static const long timeout_open_handshake = 0;
       };
-#endif
+
       /**
        * virtualized wrapper for the various underlying connection functions needed in req/resp processng
        */
       struct abstract_conn {
-         virtual ~abstract_conn() {}
+         virtual ~abstract_conn() = default;
          virtual bool verify_max_bytes_in_flight() = 0;
          virtual bool verify_max_requests_in_flight() = 0;
          virtual void handle_exception() = 0;
 
-         virtual void send_response(std::string body, int code) = 0;
+         virtual void send_response(std::optional<std::string> body, int code) = 0;
       };
 
       using abstract_conn_ptr = std::shared_ptr<abstract_conn>;
@@ -171,12 +168,25 @@ namespace eosio {
          } catch(...) {}
          return 0;
       }
+
+      /**
+       * Helper method to calculate the "in flight" size of a std::optional<T>
+       * When the optional doesn't contain value, it will return the size of 0
+       *
+       * @param o - the std::optional<T> where T is typename
+       * @return in flight size of o
+       */
+      template<typename T>
+      static size_t in_flight_sizeof( const std::optional<T>& o ) {
+         if( o ) {
+            return in_flight_sizeof( *o );
+         }
+         return 0;
+      }
    }
 
    using websocket_server_type = websocketpp::server<detail::asio_with_stub_log<websocketpp::transport::asio::basic_socket::endpoint>>;
-#ifdef BOOST_ASIO_HAS_LOCAL_SOCKETS
    using websocket_local_server_type = websocketpp::server<detail::asio_local_with_stub_log>;
-#endif
    using websocket_server_tls_type =  websocketpp::server<detail::asio_with_stub_log<websocketpp::transport::asio::tls_socket::endpoint>>;
    using ssl_context_ptr =  websocketpp::lib::shared_ptr<websocketpp::lib::asio::ssl::context>;
    using http_plugin_impl_ptr = std::shared_ptr<class http_plugin_impl>;
@@ -219,10 +229,8 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
 
          websocket_server_tls_type https_server;
 
-#ifdef BOOST_ASIO_HAS_LOCAL_SOCKETS
          std::optional<asio::local::stream_protocol::endpoint> unix_endpoint;
          websocket_local_server_type unix_server;
-#endif
 
          bool                     validate_host = true;
          set<string>              valid_hosts;
@@ -246,7 +254,7 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
             }
          }
 
-         ssl_context_ptr on_tls_init(websocketpp::connection_hdl hdl) {
+         ssl_context_ptr on_tls_init() {
             ssl_context_ptr ctx = websocketpp::lib::make_shared<websocketpp::lib::asio::ssl::context>(asio::ssl::context::sslv23_server);
 
             try {
@@ -391,7 +399,7 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
                 _impl->requests_in_flight += 1;
             }
 
-            ~abstract_conn_impl() {
+            ~abstract_conn_impl() override {
                 _impl->requests_in_flight -= 1;
             }
 
@@ -414,8 +422,10 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
                http_plugin_impl::handle_exception<T>(_conn);
             }
 
-            void send_response(std::string body, int code) override {
-               _conn->set_body(std::move(body));
+            void send_response(std::optional<std::string> body, int code) override {
+               if( body ) {
+                  _conn->set_body( std::move( *body ) );
+               }
                _conn->set_status( websocketpp::http::status_code::value( code ) );
                _conn->send_http_response();
             }
@@ -481,15 +491,15 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
              * const accessor
              * @return const reference to the contained object
              */
-            const T& operator* () const {
+            const T& obj() const {
                return _object;
             }
 
             /**
-             * mutable accessor (can be moved frmo)
+             * mutable accessor (can be moved from)
              * @return mutable reference to the contained object
              */
-            T& operator* () {
+            T& obj() {
                return _object;
             }
 
@@ -525,7 +535,7 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
                   return;
                }
 
-               url_response_callback wrapped_then = [tracked_b, then=std::move(then)](int code, fc::variant resp) {
+               url_response_callback wrapped_then = [tracked_b, then=std::move(then)](int code, std::optional<fc::variant> resp) {
                   then(code, std::move(resp));
                };
 
@@ -534,7 +544,7 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
                app().post( priority, [next_ptr, conn=std::move(conn), r=std::move(r), tracked_b, wrapped_then=std::move(wrapped_then)]() mutable {
                   try {
                      // call the `next` url_handler and wrap the response handler
-                     (*next_ptr)( std::move( r ), std::move(*(*tracked_b)), std::move(wrapped_then)) ;
+                     (*next_ptr)( std::move( r ), std::move(tracked_b->obj()), std::move(wrapped_then)) ;
                   } catch( ... ) {
                      conn->handle_exception();
                   }
@@ -550,7 +560,7 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
           * @return the constructed internal_url_handler
           */
          static detail::internal_url_handler make_http_thread_url_handler(url_handler next) {
-            return [next=std::move(next)]( detail::abstract_conn_ptr conn, string r, string b, url_response_callback then ) {
+            return [next=std::move(next)]( const detail::abstract_conn_ptr& conn, string r, string b, url_response_callback then ) {
                try {
                   next(std::move(r), std::move(b), std::move(then));
                } catch( ... ) {
@@ -567,8 +577,8 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
           * @return lambda suitable for url_response_callback
           */
          template<typename T>
-         auto make_http_response_handler( detail::abstract_conn_ptr abstract_conn_ptr) {
-            return [my=shared_from_this(), abstract_conn_ptr]( int code, fc::variant response ) {
+         auto make_http_response_handler( const detail::abstract_conn_ptr& abstract_conn_ptr) {
+            return [my=shared_from_this(), abstract_conn_ptr]( int code, std::optional<fc::variant> response ) {
                auto tracked_response = make_in_flight(std::move(response), my);
                if (!abstract_conn_ptr->verify_max_bytes_in_flight()) {
                   return;
@@ -578,9 +588,13 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
                boost::asio::post( my->thread_pool->get_executor(),
                                   [my, abstract_conn_ptr, code, tracked_response=std::move(tracked_response)]() {
                   try {
-                     std::string json = fc::json::to_string( *(*tracked_response), fc::time_point::now() + my->max_response_time );
-                     auto tracked_json = make_in_flight(std::move(json), my);
-                     abstract_conn_ptr->send_response(std::move(*(*tracked_json)), code);
+                     if( tracked_response->obj().has_value() ) {
+                        std::string json = fc::json::to_string( *tracked_response->obj(), fc::time_point::now() + my->max_response_time );
+                        auto tracked_json = make_in_flight( std::move( json ), my );
+                        abstract_conn_ptr->send_response( std::move( tracked_json->obj() ), code );
+                     } else {
+                        abstract_conn_ptr->send_response( {}, code );
+                     }
                   } catch( ... ) {
                      abstract_conn_ptr->handle_exception();
                   }
@@ -658,27 +672,24 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
             }
          }
 
-         void add_aliases_for_endpoint( const tcp::endpoint& ep, string host, string port ) {
+         void add_aliases_for_endpoint( const tcp::endpoint& ep, const string& host, const string& port ) {
             auto resolved_port_str = std::to_string(ep.port());
             valid_hosts.emplace(host + ":" + port);
             valid_hosts.emplace(host + ":" + resolved_port_str);
          }
    };
 
-#ifdef BOOST_ASIO_HAS_LOCAL_SOCKETS
    template<>
    bool http_plugin_impl::allow_host<detail::asio_local_with_stub_log>(const detail::asio_local_with_stub_log::request_type& req, websocketpp::server<detail::asio_local_with_stub_log>::connection_ptr con) {
       return true;
    }
-#endif
 
    http_plugin::http_plugin():my(new http_plugin_impl()){
       app().register_config_type<https_ecdh_curve_t>();
    }
-   http_plugin::~http_plugin(){}
+   http_plugin::~http_plugin() = default;
 
    void http_plugin::set_program_options(options_description&, options_description& cfg) {
-#ifdef BOOST_ASIO_HAS_LOCAL_SOCKETS
       if(current_http_plugin_defaults.default_unix_socket_path.length())
          cfg.add_options()
             ("unix-socket-path", bpo::value<string>()->default_value(current_http_plugin_defaults.default_unix_socket_path),
@@ -686,8 +697,7 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
       else
          cfg.add_options()
             ("unix-socket-path", bpo::value<string>(),
-             "The filename (relative to data-dir) to create a unix socket for HTTP RPC; set blank to disable.");   
-#endif
+             "The filename (relative to data-dir) to create a unix socket for HTTP RPC; set blank to disable.");
 
       if(current_http_plugin_defaults.default_http_port)
          cfg.add_options()
@@ -786,14 +796,12 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
             }
          }
 
-#ifdef BOOST_ASIO_HAS_LOCAL_SOCKETS
          if( options.count( "unix-socket-path" ) && !options.at( "unix-socket-path" ).as<string>().empty()) {
             boost::filesystem::path sock_path = options.at("unix-socket-path").as<string>();
             if (sock_path.is_relative())
                sock_path = app().data_dir() / sock_path;
             my->unix_endpoint = asio::local::stream_protocol::endpoint(sock_path.string());
          }
-#endif
 
          if( options.count( "https-server-address" ) && options.at( "https-server-address" ).as<string>().length()) {
             if( !options.count( "https-certificate-chain-file" ) ||
@@ -868,7 +876,6 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
                }
             }
 
-#ifdef BOOST_ASIO_HAS_LOCAL_SOCKETS
             if(my->unix_endpoint) {
                try {
                   my->unix_server.clear_access_channels(websocketpp::log::alevel::all);
@@ -877,7 +884,7 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
                   my->unix_server.listen(*my->unix_endpoint);
                   // captures `this`, my needs to live as long as unix_server is handling requests
                   my->unix_server.set_http_handler([this](connection_hdl hdl) {
-                     my->handle_http_request<detail::asio_local_with_stub_log>( my->unix_server.get_con_from_hdl(hdl));
+                     my->handle_http_request<detail::asio_local_with_stub_log>( my->unix_server.get_con_from_hdl(std::move(hdl)));
                   });
                   my->unix_server.start_accept();
                } catch ( const fc::exception& e ){
@@ -891,12 +898,12 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
                   throw;
                }
             }
-#endif
+
             if(my->https_listen_endpoint) {
                try {
                   my->create_server_for_endpoint(*my->https_listen_endpoint, my->https_server);
-                  my->https_server.set_tls_init_handler([this](websocketpp::connection_hdl hdl) -> ssl_context_ptr{
-                     return my->on_tls_init(hdl);
+                  my->https_server.set_tls_init_handler([this](const websocketpp::connection_hdl& hdl) -> ssl_context_ptr{
+                     return my->on_tls_init();
                   });
 
                   fc_ilog( logger, "start listening for https requests" );
@@ -916,7 +923,7 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
 
             add_api({{
                std::string("/v1/node/get_supported_apis"),
-               [&](string, string body, url_response_callback cb) mutable {
+               [&](const string&, string body, url_response_callback cb) mutable {
                   try {
                      if (body.empty()) body = "{}";
                      auto result = (*this).get_supported_apis();
@@ -942,10 +949,8 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
          my->server.stop_listening();
       if(my->https_server.is_listening())
          my->https_server.stop_listening();
-#ifdef BOOST_ASIO_HAS_LOCAL_SOCKETS
       if(my->unix_server.is_listening())
          my->unix_server.stop_listening();
-#endif
 
       if( my->thread_pool ) {
          my->thread_pool->stop();
@@ -992,13 +997,8 @@ class http_plugin_impl : public std::enable_shared_from_this<http_plugin_impl> {
          } catch (fc::exception& e) {
             error_results results{500, "Internal Service Error", error_results::error_info(e, verbose_http_errors)};
             cb( 500, fc::variant( results ));
-            if (e.code() != chain::greylist_net_usage_exceeded::code_value &&
-                e.code() != chain::greylist_cpu_usage_exceeded::code_value &&
-                e.code() != fc::timeout_exception::code_value ) {
-               fc_elog( logger, "FC Exception encountered while processing ${api}.${call}",
-                        ("api", api_name)( "call", call_name ) );
-            }
-            fc_dlog( logger, "Exception Details: ${e}", ("e", e.to_detail_string()) );
+            fc_dlog( logger, "Exception while processing ${api}.${call}: ${e}",
+                     ("api", api_name)( "call", call_name )("e", e.to_detail_string()) );
          } catch (std::exception& e) {
             error_results results{500, "Internal Service Error", error_results::error_info(fc::exception( FC_LOG_MESSAGE( error, e.what())), verbose_http_errors)};
             cb( 500, fc::variant( results ));

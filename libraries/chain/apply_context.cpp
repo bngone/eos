@@ -222,6 +222,7 @@ void apply_context::exec()
    increment_action_id();
    for( uint32_t i = 1; i < _notified.size(); ++i ) {
       std::tie( receiver, action_ordinal ) = _notified[i];
+      _db_context->receiver = receiver;
       exec_one();
       increment_action_id();
    }
@@ -358,6 +359,7 @@ void apply_context::execute_inline( action&& a ) {
       try {
          control.get_authorization_manager()
                 .check_authorization( {a},
+                                      {},
                                       {},
                                       {{receiver, config::eosio_code_name}},
                                       control.pending_block_time() - trx_context.published,
@@ -525,6 +527,7 @@ void apply_context::schedule_deferred_transaction( const uint128_t& sender_id, a
          control.get_authorization_manager()
                 .check_authorization( trx.actions,
                                       {},
+                                      {},
                                       {{receiver, config::eosio_code_name}},
                                       delay,
                                       std::bind(&transaction_context::checktime, &this->trx_context),
@@ -582,10 +585,6 @@ void apply_context::schedule_deferred_transaction( const uint128_t& sender_id, a
       }
 
       if (auto dm_logger = control.get_deep_mind_logger()) {
-         fc::datastream<const char*> ds( ptr->packed_trx.data(), ptr->packed_trx.size() );
-         transaction dtrx;
-         fc::raw::unpack(ds, dtrx);
-
          fc_dlog(*dm_logger, "DTRX_OP MODIFY_CANCEL ${action_id} ${sender} ${sender_id} ${payer} ${published} ${delay} ${expiration} ${trx_id} ${trx}",
             ("action_id", get_action_id())
             ("sender", receiver)
@@ -594,8 +593,8 @@ void apply_context::schedule_deferred_transaction( const uint128_t& sender_id, a
             ("published", ptr->published)
             ("delay", ptr->delay_until)
             ("expiration", ptr->expiration)
-            ("trx_id", dtrx.id())
-            ("trx", control.maybe_to_variant_with_abi(dtrx, abi_serializer::create_yield_function(control.get_abi_serializer_max_time())))
+            ("trx_id", ptr->trx_id)
+            ("trx", fc::to_hex(ptr->packed_trx.data(), ptr->packed_trx.size()))
          );
       }
 
@@ -626,7 +625,7 @@ void apply_context::schedule_deferred_transaction( const uint128_t& sender_id, a
                ("delay", gtx.delay_until)
                ("expiration", gtx.expiration)
                ("trx_id", trx.id())
-               ("trx", control.maybe_to_variant_with_abi(trx, abi_serializer::create_yield_function(control.get_abi_serializer_max_time())))
+               ("trx", fc::to_hex(gtx.packed_trx.data(), gtx.packed_trx.size()))
             );
          }
       } );
@@ -654,8 +653,8 @@ void apply_context::schedule_deferred_transaction( const uint128_t& sender_id, a
                ("published", gtx.published)
                ("delay", gtx.delay_until)
                ("expiration", gtx.expiration)
-               ("trx_id", trx.id())
-               ("trx", control.maybe_to_variant_with_abi(trx, abi_serializer::create_yield_function(control.get_abi_serializer_max_time())))
+               ("trx_id", gtx.trx_id)
+               ("trx", fc::to_hex(gtx.packed_trx.data(), gtx.packed_trx.size()))
             );
          }
       } );
@@ -678,10 +677,6 @@ bool apply_context::cancel_deferred_transaction( const uint128_t& sender_id, acc
    if ( gto ) {
       std::string event_id;
       if (auto dm_logger = control.get_deep_mind_logger()) {
-         fc::datastream<const char*> ds( gto->packed_trx.data(), gto->packed_trx.size() );
-         transaction dtrx;
-         fc::raw::unpack(ds, dtrx);
-
          event_id = STORAGE_EVENT_ID("${id}", ("id", gto->id));
 
          fc_dlog(*dm_logger, "DTRX_OP CANCEL ${action_id} ${sender} ${sender_id} ${payer} ${published} ${delay} ${expiration} ${trx_id} ${trx}",
@@ -692,8 +687,8 @@ bool apply_context::cancel_deferred_transaction( const uint128_t& sender_id, acc
             ("published", gto->published)
             ("delay", gto->delay_until)
             ("expiration", gto->expiration)
-            ("trx_id", dtrx.id())
-            ("trx", control.maybe_to_variant_with_abi(dtrx, abi_serializer::create_yield_function(control.get_abi_serializer_max_time())))
+            ("trx_id", gto->trx_id)
+            ("trx", fc::to_hex(gto->packed_trx.data(), gto->packed_trx.size()))
          );
       }
 

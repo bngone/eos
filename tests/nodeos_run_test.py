@@ -60,14 +60,14 @@ Utils.setIrreversibleTimeout(timeout)
 try:
     TestHelper.printSystemInfo("BEGIN")
     cluster.setWalletMgr(walletMgr)
-    Print("SERVER: %s" % (server))
-    Print("PORT: %d" % (port))
 
     if localTest and not dontLaunch:
         cluster.killall(allInstances=killAll)
         cluster.cleanup()
         Print("Stand up cluster")
-        if cluster.launch(prodCount=prodCount, onlyBios=onlyBios, dontBootstrap=dontBootstrap) is False:
+        specificExtraNodeosArgs={ 0 : " --backing-store=chainbase",
+                                  1 : " --backing-store=rocksdb" }
+        if cluster.launch(totalNodes=3, prodCount=prodCount, onlyBios=onlyBios, dontBootstrap=dontBootstrap, specificExtraNodeosArgs=specificExtraNodeosArgs, printInfo=True) is False:
             cmdError("launcher")
             errorExit("Failed to stand up eos cluster.")
     else:
@@ -458,7 +458,7 @@ try:
         raise
 
     Print("Test for block decoded packed transaction (issue 2932)")
-    blockId=node.getBlockIdByTransId(transId)
+    blockId=node.getBlockNumByTransId(transId)
     assert(blockId)
     block=node.getBlock(blockId, exitOnError=True)
 
@@ -506,7 +506,7 @@ try:
     contract="currency1111"
     action="transfer"
     data="{\"from\":\"defproducera\",\"to\":\"currency1111\",\"quantity\":"
-    data +="\"00.0051 CUR\",\"memo\":\"test\"}"
+    data +="\"00.0151 CUR\",\"memo\":\"test\"}"
     opts="--permission defproducera@active"
     trans=node.pushMessage(contract, action, data, opts, True)
     if trans is None or trans[0]:

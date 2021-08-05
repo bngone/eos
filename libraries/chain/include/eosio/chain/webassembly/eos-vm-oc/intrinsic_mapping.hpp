@@ -278,6 +278,10 @@ inline constexpr auto get_intrinsic_table() {
       "env.set_wasm_parameters_packed",
       "env.get_parameters_packed",
       "env.set_parameters_packed",
+      "env.add_security_group_participants",
+      "env.remove_security_group_participants",
+      "env.in_active_security_group",
+      "env.get_active_security_group"
 
       "env.push_data",
       "env.get_input_data",

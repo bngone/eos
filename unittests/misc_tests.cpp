@@ -3,12 +3,15 @@
 #include <eosio/chain/authority_checker.hpp>
 #include <eosio/chain/types.hpp>
 #include <eosio/chain/thread_utils.hpp>
+#include <eosio/chain/block_log.hpp>
 #include <eosio/testing/tester.hpp>
 
 #include <fc/io/json.hpp>
 #include <fc/log/logger_config.hpp>
 #include <appbase/execution_priority_queue.hpp>
 #include <fc/bitutil.hpp>
+
+#include <thread>
 
 #include <boost/test/unit_test.hpp>
 
@@ -674,7 +677,7 @@ BOOST_AUTO_TEST_CASE(alphabetic_sort)
   std::sort(words.begin(), words.end(), std::less<string>());
 
   vector<uint64_t> uwords;
-  for(const auto w: words) {
+  for(const auto& w: words) {
     auto n = name(w.c_str());
     uwords.push_back(n.to_uint64_t());
   }
@@ -694,6 +697,14 @@ BOOST_AUTO_TEST_CASE(alphabetic_sort)
 } FC_LOG_AND_RETHROW() }
 
 
+static void verify_packed_transaction_conversion(const packed_transaction_v0& original, const packed_transaction_v0_ptr final) {
+   // prunable_size and unprunable_size must be maintained
+   BOOST_CHECK_EQUAL(original.get_prunable_size(), final->get_prunable_size());
+   BOOST_CHECK_EQUAL(original.get_unprunable_size(), final->get_unprunable_size());
+   // context_free_data must be maintained
+   BOOST_REQUIRE_EQUAL(original.get_context_free_data().size(), final->get_context_free_data().size());
+   BOOST_CHECK(std::equal(original.get_context_free_data().begin(), original.get_context_free_data().end(), final->get_context_free_data().begin()));
+}
 BOOST_AUTO_TEST_CASE(transaction_test) { try {
 
    testing::TESTER test;
@@ -826,6 +837,49 @@ BOOST_AUTO_TEST_CASE(transaction_test) { try {
    BOOST_CHECK( packed != fc::raw::pack( static_cast<const transaction&>(pkt8.get_transaction()) ));
    BOOST_CHECK( packed == pkt8.get_packed_transaction() ); // extra maintained
 
+   // Round trip from v0 to v1 to v0 (packed_transaction_v0 to
+   // packed_transaction_v0) with extra packed transaction and
+   // extra packed context free data
+   auto packed_context_free_data_extra = pkt6.to_packed_transaction_v0()->get_packed_context_free_data();
+   packed_context_free_data_extra.push_back('e');
+   packed_context_free_data_extra.push_back('x');
+   packed_context_free_data_extra.push_back('t');
+   packed_context_free_data_extra.push_back('r');
+   packed_context_free_data_extra.push_back('a');
+
+   packed_transaction_v0 pkt_v0_original( packed, *pkt6.get_signatures(),packed_context_free_data_extra, packed_transaction_v0::compression_type::none );
+   packed_transaction pkt_v0_to_v1(pkt_v0_original, true);
+   auto pkt_v0_final = pkt_v0_to_v1.to_packed_transaction_v0();
+   BOOST_CHECK_EQUAL(pkt.get_transaction().id(), pkt_v0_final->get_transaction().id());
+   BOOST_CHECK( packed != fc::raw::pack( static_cast<const transaction&>(pkt_v0_final->get_transaction()) ));
+   BOOST_CHECK( packed == pkt_v0_final->get_packed_transaction() );
+   verify_packed_transaction_conversion(pkt_v0_original, pkt_v0_final);
+
+   // Round trip from v0 to v1 to v0 (packed_transaction_v0 to
+   // packed_transaction_v0) with empty context free data
+   signed_transaction empty_cfd_trx;
+   empty_cfd_trx.context_free_actions.push_back({ {}, "eosio"_n, ""_n, bytes() });
+   empty_cfd_trx.context_free_data.push_back(bytes());
+   test.set_transaction_headers(empty_cfd_trx);
+   empty_cfd_trx.sign( test.get_private_key( "eosio"_n, "active" ), test.control->get_chain_id() );
+   packed_transaction_v0 pkt_v0_empty_cfd_original(empty_cfd_trx);
+   packed_transaction pkt_v0_to_v1_empty_cfd(pkt_v0_empty_cfd_original, true);
+   auto pkt_v0_empty_cfd_final = pkt_v0_to_v1_empty_cfd.to_packed_transaction_v0();
+   verify_packed_transaction_conversion(pkt_v0_empty_cfd_original, pkt_v0_empty_cfd_final);
+
+   // Round trip from v1 to v0 to v1 (packed_transaction to packed_transaction)
+   // with extra packed transaction and extra packed context free data
+   auto pkt_v1_original {pkt_v0_to_v1};
+   auto pkt_v1_to_v0 = pkt_v1_original.to_packed_transaction_v0();
+   packed_transaction pkt_v1_final(*pkt_v1_to_v0, true);
+
+   BOOST_CHECK_EQUAL(pkt.get_transaction().id(), pkt_v1_final.get_transaction().id());
+   BOOST_CHECK( packed != fc::raw::pack( static_cast<const transaction&>(pkt_v1_final.get_transaction()) ));
+   BOOST_CHECK( packed == pkt_v1_final.get_packed_transaction() );
+   BOOST_CHECK_EQUAL(pkt_v1_original.get_prunable_size(), pkt_v1_final.get_prunable_size());
+   BOOST_CHECK_EQUAL(pkt_v1_original.get_unprunable_size(), pkt_v1_final.get_unprunable_size());
+   BOOST_REQUIRE_EQUAL(pkt_v1_original.get_context_free_data()->size(), pkt_v1_final.get_context_free_data()->size());
+   BOOST_CHECK(std::equal(pkt_v1_original.get_context_free_data()->begin(), pkt_v1_original.get_context_free_data()->end(), pkt_v1_final.get_context_free_data()->begin()));
 } FC_LOG_AND_RETHROW() }
 
 
@@ -909,12 +963,12 @@ BOOST_AUTO_TEST_CASE(transaction_metadata_test) { try {
 
       named_thread_pool thread_pool( "misc", 5 );
 
-      auto fut = transaction_metadata::start_recover_keys( ptrx, thread_pool.get_executor(), test.control->get_chain_id(), fc::microseconds::maximum() );
-      auto fut2 = transaction_metadata::start_recover_keys( ptrx2, thread_pool.get_executor(), test.control->get_chain_id(), fc::microseconds::maximum() );
+      auto fut = transaction_metadata::start_recover_keys( ptrx, thread_pool.get_executor(), test.control->get_chain_id(), fc::microseconds::maximum(), transaction_metadata::trx_type::input );
+      auto fut2 = transaction_metadata::start_recover_keys( ptrx2, thread_pool.get_executor(), test.control->get_chain_id(), fc::microseconds::maximum(), transaction_metadata::trx_type::input );
 
       // start another key reovery on same packed_transaction, creates a new future with transaction_metadata, should not interfere with above
-      transaction_metadata::start_recover_keys( ptrx, thread_pool.get_executor(), test.control->get_chain_id(), fc::microseconds::maximum() );
-      transaction_metadata::start_recover_keys( ptrx2, thread_pool.get_executor(), test.control->get_chain_id(), fc::microseconds::maximum() );
+      transaction_metadata::start_recover_keys( ptrx, thread_pool.get_executor(), test.control->get_chain_id(), fc::microseconds::maximum(), transaction_metadata::trx_type::input );
+      transaction_metadata::start_recover_keys( ptrx2, thread_pool.get_executor(), test.control->get_chain_id(), fc::microseconds::maximum(), transaction_metadata::trx_type::input );
 
       auto mtrx = fut.get();
       const auto& keys = mtrx->recovered_keys();
@@ -1021,16 +1075,19 @@ static checksum256_type calculate_trx_merkle( const deque<transaction_receipt>& 
    return merkle( move( trx_digests ) );
 }
 
+eosio::chain::transaction_trace_ptr push_cfd_transaction(eosio::testing::tester& t) {
+    signed_transaction trx;
+    trx.actions.push_back({ { permission_level{ "eosio"_n, "active"_n } }, "eosio"_n, ""_n, bytes() } );
+    trx.context_free_actions.push_back({ {}, "eosio"_n, ""_n, bytes() });
+    trx.context_free_data.push_back(bytes());
+    t.set_transaction_headers(trx);
+    trx.sign( t.get_private_key( "eosio"_n, "active" ), t.control->get_chain_id() );
+    return t.push_transaction(trx);
+}
+
 BOOST_AUTO_TEST_CASE(pruned_block_test) {
    tester t;
-   signed_transaction trx;
-   trx.actions.push_back({ { permission_level{ "eosio"_n, "active"_n } }, "eosio"_n, ""_n, bytes() } );
-   trx.context_free_actions.push_back({ {}, "eosio"_n, ""_n, bytes() });
-   trx.context_free_data.push_back(bytes());
-   t.set_transaction_headers(trx);
-   trx.sign( t.get_private_key( "eosio"_n, "active" ), t.control->get_chain_id() );
-
-   t.push_transaction(trx);
+   push_cfd_transaction(t);
    signed_block_ptr produced = t.produce_block();
    auto original = produced->to_signed_block_v0();
    BOOST_REQUIRE(original);
@@ -1064,6 +1121,20 @@ BOOST_AUTO_TEST_CASE(pruned_block_test) {
    BOOST_TEST(out.tellp() <= buffer.size());
 
    BOOST_TEST(!deserialized.to_signed_block_v0());
+}
+
+BOOST_AUTO_TEST_CASE(block_prune_state_test) {
+   tester t;
+   eosio::chain::transaction_trace_ptr trace;
+   trace = push_cfd_transaction(t);
+   signed_block_ptr produced = t.produce_block();
+   BOOST_TEST(trace->block_num == produced->block_num());
+   t.produce_blocks(10);
+   block_log blog(t.get_config().blog);
+   std::vector<transaction_id_type> ids{trace->id};
+   BOOST_TEST(blog.prune_transactions(trace->block_num, ids) == 1);
+   auto signed_blk_ptr = blog.read_signed_block_by_num(trace->block_num);
+   BOOST_TEST(!signed_blk_ptr->to_signed_block_v0());
 }
 
 BOOST_AUTO_TEST_CASE(reflector_init_test) {
